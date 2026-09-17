@@ -1,0 +1,81 @@
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v6.0.3
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential python3 clang-format
+
+      - name: Checkout pico-sdk
+        uses: actions/checkout@v6.0.3
+        with:
+          repository: raspberrypi/pico-sdk
+          path: pico-sdk
+          submodules: true
+          ref: 2.1.1
+
+      - name: Set PICO_SDK_PATH
+        run: echo "PICO_SDK_PATH=$GITHUB_WORKSPACE/pico-sdk" >> "$GITHUB_ENV"
+
+      # Generated headers are committed; keep make from regenerating them after checkout.
+      - name: Mark generated headers up to date
+        run: touch firmware/doth/easing.h firmware/doth/filter.h
+
+      - name: Build firmware and copy UF2 to web/public
+        working-directory: firmware
+        run: make build
+
+      - name: Set up Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web loader
+        working-directory: web
+        env:
+          VITE_BASE: /artificial-infinite/
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5.0.1

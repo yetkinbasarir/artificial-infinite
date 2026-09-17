@@ -1,18 +1,21 @@
 cmake_minimum_required(VERSION 3.18)
 
 if(NOT PICO_SDK_PATH)
+	# Search order: env, ../pico-sdk (next to the repo), firmware/pico-sdk, <repo root>/pico-sdk
 	if(DEFINED ENV{PICO_SDK_PATH})
 		set(PICO_SDK_PATH "$ENV{PICO_SDK_PATH}")
-	elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../pico-sdk/pico_sdk_init.cmake")
-		set(PICO_SDK_PATH "${CMAKE_CURRENT_LIST_DIR}/../pico-sdk")
+	elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../../pico-sdk/pico_sdk_init.cmake")
+		set(PICO_SDK_PATH "${CMAKE_CURRENT_LIST_DIR}/../../pico-sdk")
 	elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/pico-sdk/pico_sdk_init.cmake")
 		set(PICO_SDK_PATH "${CMAKE_CURRENT_LIST_DIR}/pico-sdk")
+	elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../pico-sdk/pico_sdk_init.cmake")
+		set(PICO_SDK_PATH "${CMAKE_CURRENT_LIST_DIR}/../pico-sdk")
 	endif()
 endif()
 
 include(pico_sdk_import.cmake)
 
-project(pikocore C CXX ASM)
+project(artificial_infinite C CXX ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -61,18 +64,8 @@ function(add_pikocore_firmware TARGET_NAME OUTPUT_BASENAME FLASH_SIZE_BYTES)
 		${CMAKE_CURRENT_LIST_DIR}/src
 	)
 
-	set(PIKOCODE_DEFINITIONS_FILE "${CMAKE_CURRENT_LIST_DIR}/target_compile_definitions.cmake")
-	if(NOT EXISTS "${PIKOCODE_DEFINITIONS_FILE}")
-		set(PIKOCODE_DEFINITIONS_FILE "${CMAKE_CURRENT_LIST_DIR}/target_compile_definitions.cmake.default")
-	else()
-		file(READ "${PIKOCODE_DEFINITIONS_FILE}" PIKOCODE_DEFINITIONS_CONTENT)
-		if(NOT PIKOCODE_DEFINITIONS_CONTENT MATCHES "PIKOCODE_TARGET")
-			message(WARNING "target_compile_definitions.cmake is stale; using target_compile_definitions.cmake.default")
-			set(PIKOCODE_DEFINITIONS_FILE "${CMAKE_CURRENT_LIST_DIR}/target_compile_definitions.cmake.default")
-		endif()
-	endif()
 	set(PIKOCODE_TARGET ${TARGET_NAME})
-	include("${PIKOCODE_DEFINITIONS_FILE}")
+	include("${CMAKE_CURRENT_LIST_DIR}/target_compile_definitions.cmake")
 	unset(PIKOCODE_TARGET)
 
 	target_compile_definitions(${TARGET_NAME} PRIVATE
@@ -95,15 +88,4 @@ function(add_pikocore_firmware TARGET_NAME OUTPUT_BASENAME FLASH_SIZE_BYTES)
 	)
 endfunction()
 
-add_pikocore_firmware(pikocore_2mb "pikocore-2mb" 2097152)
-
-add_pikocore_firmware(pikocore_4mb "pikocore-4mb" 4194304)
-
-add_pikocore_firmware(${PROJECT_NAME} "pikocore" 16777216)
-add_custom_command(
-	TARGET ${PROJECT_NAME}
-	POST_BUILD
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different
-		"$<TARGET_FILE_DIR:${PROJECT_NAME}>/${PROJECT_NAME}.uf2"
-		"$<TARGET_FILE_DIR:${PROJECT_NAME}>/pikocore-16mb.uf2"
-)
+add_pikocore_firmware(artificial_infinite "artificial-infinite-2mb" 2097152)

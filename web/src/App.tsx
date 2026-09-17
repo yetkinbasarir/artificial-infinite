@@ -43,25 +43,11 @@ const serial = new PikocoreSerial();
 const requiredFirmwareLabel = '2.2 or newer';
 const firmwareOptions = [
   {
-    file: 'pikocore-16mb.uf2',
-    name: 'pikocore-16mb.uf2',
-    label: '16 MB pikocore',
-    title: 'Download the default 16 MB pikocore UF2 firmware',
-    default: true,
-  },
-  {
-    file: 'pikocore-4mb.uf2',
-    name: 'pikocore-4mb.uf2',
-    label: '4 MB',
-    title: 'Download the 4 MB UF2 firmware',
-    default: false,
-  },
-  {
-    file: 'pikocore-2mb.uf2',
-    name: 'pikocore-2mb.uf2',
+    file: 'artificial-infinite-2mb.uf2',
+    name: 'artificial-infinite-2mb.uf2',
     label: '2 MB',
-    title: 'Download the 2 MB UF2 firmware',
-    default: false,
+    title: 'Download the 2 MB artificial-infinite UF2 firmware',
+    default: true,
   },
 ] as const;
 
@@ -93,7 +79,6 @@ export function App() {
   const [firmwareDownloadDetail, setFirmwareDownloadDetail] = useState<TransferDetail | null>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [playheadFrame, setPlayheadFrame] = useState(0);
-  const [firmwareFile, setFirmwareFile] = useState<(typeof firmwareOptions)[number]['file']>(firmwareOptions[0].file);
   const [debugLog, setDebugLog] = useState<string[]>([]);
   const [debugOpen, setDebugOpen] = useState(false);
   const [ittybittymidiInfoOpen, setIttybittymidiInfoOpen] = useState(false);
@@ -192,7 +177,7 @@ export function App() {
   const bankEditingDisabled = !connected || busy || incompatibleDevice != null;
   const uploadNeedsSync = connected && incompatibleDevice == null && bankDirty;
   const uploadDisabled = !connected || incompatibleDevice != null || busy || overCapacity || (!uploadNeedsSync && samples.length === 0);
-  const selectedFirmware = firmwareOptions.find((option) => option.file === firmwareFile) ?? firmwareOptions[0];
+  const selectedFirmware = firmwareOptions[0];
   const firmwareDownloadUrl = `${import.meta.env.BASE_URL}${selectedFirmware.file}`;
   const uploadTransferText =
     busy && status.text === 'Uploading' && uploadDetail
@@ -866,19 +851,6 @@ export function App() {
             Erase
           </button>
           <div className="firmware-download" data-tour="uf2">
-            <select
-              className={selectedFirmware.default ? 'default-firmware' : undefined}
-              value={firmwareFile}
-              onChange={(event) => setFirmwareFile(event.currentTarget.value as (typeof firmwareOptions)[number]['file'])}
-              title="Choose UF2 firmware flash size"
-              aria-label="Choose UF2 firmware flash size"
-            >
-              {firmwareOptions.map((option) => (
-                <option key={option.file} value={option.file}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
             <button
               type="button"
               className={selectedFirmware.default ? 'primary' : undefined}
@@ -1004,7 +976,7 @@ export function App() {
             </a>
             .
           </p>
-          <p>Required firmware: {requiredFirmwareLabel}. Use the UF2 selector and download button above.</p>
+          <p>Required firmware: {requiredFirmwareLabel}. Use the UF2 download button above.</p>
         </section>
       ) : null}
 
