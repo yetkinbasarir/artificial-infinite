@@ -9,11 +9,26 @@ The first commit in this repository is an unmodified snapshot of upstream at
 that commit. The second commit restructures it into a 2 MB-only base.
 
 **Firmware behaviour is identical to the upstream 2 MB build**
-(`pikocore_2mb`, `PICO_FLASH_SIZE_BYTES=2097152`). Audio engine, clock, USB
-protocol and descriptors, `USBD_MANUFACTURER`/`USBD_PRODUCT` strings, the
-`PIKO1 ...` INFO reply, bank format (v2, 12288-byte header, 128 samples,
-24 kHz) and `PIKO_FIRMWARE_RESERVE=524288` are unchanged. Known upstream bugs
-were intentionally not fixed.
+(`pikocore_2mb`, `PICO_FLASH_SIZE_BYTES=2097152`), **with one exception:**
+the boot2 flash SPI clock divider was raised from 2 to 4 (see below). Audio
+engine, clock, USB protocol and descriptors, `USBD_MANUFACTURER`/`USBD_PRODUCT`
+strings, the `PIKO1 ...` INFO reply, bank format (v2, 12288-byte header,
+128 samples, 24 kHz) and `PIKO_FIRMWARE_RESERVE=524288` are unchanged. Apart
+from that exception, known upstream bugs were intentionally not fixed.
+
+### Exception: boot2 flash SPI clock divider 2 → 4 (commit `43686b4`)
+
+The firmware overclocks the RP2040 to 248 MHz. With the default boot2 divider
+of 2, flash XIP reads run at ~124 MHz. On some 2 MB Pico boards this is too
+fast for the flash chip: the bank header was read back corrupted and the board
+reported its samples as empty. `firmware/CMakeLists.txt` now builds a
+`slower_boot2` stage with `PICO_FLASH_SPI_CLKDIV=4`, which brings the flash
+clock down to ~62 MHz. This has no effect on audio performance.
+
+Because the firmware now uses its own boot2 target, which is built from the SDK's
+`compile_time_choice.S`, `picotool info` reports `boot2_name: compile_time_choice`
+instead of `boot2_w25q080`. The longer name also shifts a few addresses in the
+binary; the code is otherwise unchanged.
 
 ## Removed
 
