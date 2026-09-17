@@ -5,7 +5,8 @@
 Artificial Infinite is a lo-fi sample mangler firmware based on
 [schollz/pikocore](https://github.com/schollz/pikocore), trimmed down to target
 **only the 2 MB Raspberry Pi Pico**. Firmware behaviour is identical to the
-upstream 2 MB build; see [UPSTREAM.md](UPSTREAM.md) for what changed.
+upstream 2 MB build, except that the boot2 flash SPI clock divider is raised to
+4; see [UPSTREAM.md](UPSTREAM.md) for details.
 
 ## Flash layout (2 MB)
 
