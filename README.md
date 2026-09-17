@@ -5,8 +5,8 @@
 Artificial Infinite is a lo-fi sample mangler firmware based on
 [schollz/pikocore](https://github.com/schollz/pikocore), trimmed down to target
 **only the 2 MB Raspberry Pi Pico**. Firmware behaviour is identical to the
-upstream 2 MB build, except that the boot2 flash SPI clock divider is raised to
-4; see [UPSTREAM.md](UPSTREAM.md) for details.
+upstream 2 MB build except for the boot2 flash SPI clock divider and the
+rebuilt external clock system; see [UPSTREAM.md](UPSTREAM.md) for details.
 
 ## Flash layout (2 MB)
 
@@ -16,6 +16,55 @@ upstream 2 MB build, except that the boot2 flash SPI clock divider is raised to
 | `0x07F000`  | 4 KB      | Settings (last sector of the firmware reserve)                  |
 | `0x080000`  | 12 KB     | Sample bank header (v2, up to 128 samples)                      |
 | `0x083000`  | ~1.56 MB  | Audio: 1,560,576 bytes ≈ 65 s of 8-bit audio at 24 kHz          |
+
+## External clock
+
+Artificial Infinite has no internal tempo: it follows an external analog pulse
+clock, so several boards fed from the same clock stay aligned.
+
+- **Clock in: GPIO 22.** Internal pull-up, falling edge.
+- **Reset in: GPIO 21.** Internal pull-up, falling edge.
+- **GPIO 23** is driven permanently high (SMPS PWM mode), so the WS2812 output
+  is disabled. There is no trigger output.
+
+Both inputs expect an inverting NPN stage, one per jack:
+
+```
+jack tip --- 100k ---+--- base (2N3904)      emitter --- GND
+                     |
+                    100k to GND
+                     |
+                  1N4148, cathode to base, anode to GND
+
+collector --- 1k --- GPIO (22 = clock, 21 = reset)
+```
+
+A rising edge at the jack is therefore a falling edge at the GPIO. Pulses
+shorter than 300 µs apart are ignored, as are resets within 50 ms of each
+other.
+
+### Behaviour
+
+- One beat is an eighth note, produced at the moment the marking pulse
+  arrives. Nothing is predicted or snapped to a grid.
+- The tempo estimate follows the incoming pulses and drives sample playback,
+  clamped to 30–300 BPM.
+- When the clock stops, the slice in flight finishes its own length and the
+  beat LED goes dark. The position is kept.
+- **Restart from step 1 when the clock starts** (on by default, switchable in
+  the web loader) makes the first pulse after a stop play the first beat again.
+  Turn it off to continue from where the clock stopped.
+- A pulse on the reset input restarts the pattern from the first beat. A reset
+  within 5 ms of a clock pulse belongs to that pulse and acts immediately;
+  otherwise it waits for the next pulse, including while the clock is stopped.
+
+### Pulse divisions
+
+1, 2, 4, 8, 12, 24 and 48 PPQN, set in the web loader; the default is 24 PPQN.
+That matches the 1010music Blackbox analog clock output. 2 PPQN suits the
+Korg SQ-1 and Volca series, and Arturia BeatStep Pro or Moog DFAM clock
+outputs work at whichever division they are set to. MIDI clock is not
+supported: the clock input is analog only.
 
 ## Repository layout
 

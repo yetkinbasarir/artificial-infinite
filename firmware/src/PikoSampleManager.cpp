@@ -10,8 +10,8 @@
 #include "pico/stdlib.h"
 #include "tusb.h"
 
-bool piko_clock_input_ittybittymidi();
 uint8_t piko_pulse_ppqn();
+bool piko_restart_on_start();
 
 extern "C" void tud_cdc_line_coding_cb(uint8_t itf,
                                        cdc_line_coding_t const* line_coding) {
@@ -187,7 +187,7 @@ void handle_info() {
   char info[512];
   uint32_t used = 0;
   int n = snprintf(info + used, sizeof(info) - used,
-                   "PIKO1 FW 2.4 F %lu R %lu S %lu A %lu C %lu U %lu SR %lu N %lu CLOCK_INPUT %s PROTO 1 BANK_VERSION %lu BANK_HEADER_SIZE %lu BANK_MAX_SAMPLES %lu CLOCK_SYNC_VERSION 1 PULSE_PPQN %u\nEND\n",
+                   "PIKO1 FW 2.4 F %lu R %lu S %lu A %lu C %lu U %lu SR %lu N %lu PROTO 1 BANK_VERSION %lu BANK_HEADER_SIZE %lu BANK_MAX_SAMPLES %lu CLOCK_SYNC_VERSION 2 PULSE_PPQN %u RESTART_ON_START %u\nEND\n",
                    static_cast<unsigned long>(piko_flash_total_bytes()),
                    static_cast<unsigned long>(PIKO_FIRMWARE_RESERVE),
                    static_cast<unsigned long>(piko_settings_flash_offset()),
@@ -196,11 +196,11 @@ void handle_info() {
                    static_cast<unsigned long>(piko_audio_audio_bytes()),
                    static_cast<unsigned long>(PIKO_BANK_SAMPLE_RATE),
                    static_cast<unsigned long>(piko_audio_sample_count()),
-                   piko_clock_input_ittybittymidi() ? "MIDI" : "CLOCK",
                    static_cast<unsigned long>(PIKO_BANK_VERSION),
                    static_cast<unsigned long>(PIKO_BANK_HEADER_SIZE),
                    static_cast<unsigned long>(PIKO_BANK_MAX_SAMPLES),
-                   piko_pulse_ppqn());
+                   piko_pulse_ppqn(),
+                   piko_restart_on_start() ? 1u : 0u);
   if (n < 0 || static_cast<uint32_t>(n) >= sizeof(info) - used) {
     return;
   }
@@ -332,19 +332,20 @@ void handle_write() {
   }
 
   piko_audio_bank_rescan();
+  const bool bank_ok = piko_audio_bank_valid();
   piko_audio_bank_set_mutating(false);
-  write_str("OK\n");
+  write_str(bank_ok ? "OK\n" : "ERR\n");
   flush_serial();
 }
 
-void handle_clock_input_mode() {
+void handle_restart_on_start() {
   const int value = read_byte_timeout(kWriteTimeoutMs);
   if (value == PICO_ERROR_TIMEOUT || (value != 0 && value != 1)) {
     write_str("ERR\n");
     flush_serial();
     return;
   }
-  if (!piko_request_clock_mode(value == 1)) {
+  if (!piko_request_restart_on_start(value == 1)) {
     write_str("ERR\n");
     flush_serial();
     return;
@@ -383,17 +384,15 @@ void handle_clock_diagnostics() {
   char payload[512];
   const int n = snprintf(
       payload, sizeof(payload),
-      "CLOCK1 SOURCE %s STATE %s BPM_X100 %lu TARGET_BPM_X100 %lu JITTER_US %lu PHASE_ERROR_US %ld MAX_PHASE_ERROR_US %lu LAST_EDGE_AGE_US %lu PPQN %u ACCEPTED %lu REJECTED %lu MISSED %lu CLOCK_QUEUE_DROPS %lu MIDI_QUEUE_DROPS %lu\nEND\n",
-      piko::clockSourceName(d.source), piko::clockStateName(d.state),
-      static_cast<unsigned long>(d.measured_bpm_x100),
-      static_cast<unsigned long>(d.target_bpm_x100),
+      "CLOCK1 SOURCE PULSE STATE %s BPM_X100 %lu JITTER_US %lu LAST_EDGE_AGE_US %lu PPQN %u ACCEPTED %lu REJECTED %lu RESTART_COUNT %lu RESET_COUNT %lu CLOCK_QUEUE_DROPS %lu MIDI_QUEUE_DROPS %lu\nEND\n",
+      piko::clockStateName(d.state),
+      static_cast<unsigned long>(d.bpm_x100),
       static_cast<unsigned long>(d.jitter_us),
-      static_cast<long>(d.phase_error_us),
-      static_cast<unsigned long>(d.max_phase_error_us),
       static_cast<unsigned long>(last_edge_age), d.pulse_ppqn,
       static_cast<unsigned long>(d.accepted_events),
-      static_cast<unsigned long>(d.rejected_events),
-      static_cast<unsigned long>(d.missed_events),
+      static_cast<unsigned long>(snapshot.rejected_edges),
+      static_cast<unsigned long>(d.restart_count),
+      static_cast<unsigned long>(d.reset_count),
       static_cast<unsigned long>(snapshot.clock_queue_drops),
       static_cast<unsigned long>(snapshot.midi_queue_drops));
   if (n <= 0 || static_cast<size_t>(n) >= sizeof(payload)) {
@@ -458,8 +457,8 @@ void piko_sample_manager_core() {
         handle_info();
         piko_request_start_playback();
         break;
-      case 'C':
-        handle_clock_input_mode();
+      case 'T':
+        handle_restart_on_start();
         break;
       case 'P':
         handle_pulse_ppqn();

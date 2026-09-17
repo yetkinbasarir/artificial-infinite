@@ -5,19 +5,16 @@
 
 namespace piko {
 
-enum class ClockSource : uint8_t { Internal = 0, Pulse = 1, Midi = 2 };
-enum class ClockState : uint8_t {
-  Unlocked = 0,
-  Acquiring = 1,
-  Locked = 2,
-  Holdover = 3,
-};
+// Captured input events. Both arrive from GPIO capture; glitch filtering
+// happens in the capture ISR, so every event handed here is accepted.
 enum class ClockEventType : uint8_t {
   Pulse = 0,
-  MidiClock = 1,
-  MidiStart = 2,
-  MidiContinue = 3,
-  MidiStop = 4,
+  Reset = 1,
+};
+
+enum class ClockState : uint8_t {
+  Stopped = 0,
+  Running = 1,
 };
 
 struct ClockEvent {
@@ -26,43 +23,48 @@ struct ClockEvent {
 };
 
 struct ClockDiagnostics {
-  ClockSource source;
   ClockState state;
-  uint32_t measured_bpm_x100;
-  uint32_t target_bpm_x100;
+  uint32_t bpm_x100;  // playback tempo estimate, clamped; 0 until measured
   uint32_t jitter_us;
-  int32_t phase_error_us;
-  uint32_t max_phase_error_us;
   uint32_t last_edge_us;
   uint8_t pulse_ppqn;
+  bool restart_on_start;
   uint32_t accepted_events;
-  uint32_t rejected_events;
-  uint32_t missed_events;
+  uint32_t restart_count;
+  uint32_t reset_count;
 };
 
+// Conventional external analog clock follower.
+//
+// Beats are eighth notes and are emitted at edge time: the pulse that lands on
+// an eighth-note landmark raises a beat on the first carrier tick that sees it.
+// Nothing is predicted, phase-shifted or snapped to a grid, so several boards
+// fed from the same clock stay sample-aligned.
 class ClockSync {
  public:
   explicit ClockSync(uint32_t carrier_hz = 1);
 
   void setCarrierHz(uint32_t carrier_hz);
-  void setInternalBpmX100(uint32_t bpm_x100);
-  void setSource(ClockSource source, uint8_t pulse_ppqn, uint32_t now_us);
-  void setPulsePpqn(uint8_t pulse_ppqn, uint32_t now_us);
+  // Changing the division drops the tempo estimate and stops the transport;
+  // the next pulse starts a fresh alignment.
+  void setPulsePpqn(uint8_t pulse_ppqn);
+  void setRestartOnStart(bool enabled);
+
   void process(const ClockEvent& event);
 
-  // Called once per PWM carrier IRQ. Returns true for one unified eighth-note
-  // event. External-clock holdover pauses until a pulse or MIDI transport start
-  // arrives; after one second it also requests a loop restart on that event.
-  // Callers may continue invoking this while sample-bank audio is muted.
+  // Called once per PWM carrier IRQ. Returns true for one eighth-note beat.
   bool advanceCarrier(uint32_t now_us);
 
-  ClockDiagnostics diagnostics() const;
-  uint64_t transportPhaseQ32() const { return transport_phase_q32_; }
+  // True once after the position must be reset to the first beat.
+  bool consumePositionReset();
+
+  ClockState state() const { return state_; }
+  uint8_t pulsePpqn() const { return pulse_ppqn_; }
+  bool restartOnStart() const { return restart_on_start_; }
   uint32_t carrierHz() const { return carrier_hz_; }
-  uint32_t targetBpmX100() const { return target_bpm_x100_; }
-  bool midiRunning() const { return midi_running_; }
-  bool transportPaused() const { return state_ == ClockState::Holdover; }
-  bool consumeLoopRestart();
+  // Tempo used for playback rate, clamped to 30..300 BPM. 0 until measured.
+  uint32_t targetBpmX100() const;
+  ClockDiagnostics diagnostics() const;
 
   static bool validPulsePpqn(uint8_t ppqn);
   static uint64_t playbackIncrementQ32(uint32_t carrier_hz,
@@ -70,62 +72,61 @@ class ClockSync {
                                        uint32_t source_bpm);
 
  private:
-  void resetAcquisition(uint32_t now_us);
-  void processLandmark(uint32_t timestamp_us, uint8_t ppqn);
-  void acceptFirstLandmark(uint32_t timestamp_us);
-  void acceptInterval(uint32_t timestamp_us, uint32_t interval_us,
-                      uint8_t multiplier, uint8_t ppqn);
-  void alignPhase(uint32_t timestamp_us, uint8_t ppqn, bool first);
-  void updateFilteredInterval(uint32_t interval_us, uint8_t ppqn,
-                              bool reset_filter);
-  void updateTransportIncrement();
-  void updateHoldover(uint32_t now_us);
-  uint32_t expectedPulseUs(uint8_t ppqn) const;
-  uint32_t eighthPeriodUs() const;
-  uint32_t medianInterval() const;
-  bool intervalBpmValid(uint32_t interval_us, uint8_t ppqn) const;
-  bool intervalAgrees(uint32_t a, uint32_t b, uint32_t percent) const;
+  static constexpr uint8_t kEdgeHistory = 25u;  // 48 PPQN needs 24 intervals
+  static constexpr uint8_t kMedianHistory = 3u;
+
+  void acceptPulse(uint32_t timestamp_us);
+  void handleReset(uint32_t timestamp_us);
+  void applyPositionReset();
+  void clearMeasurements();
+  void pushEdge(uint32_t timestamp_us);
+  uint32_t edgeAgo(uint8_t pulses_back) const;
+  void updateTempo(uint32_t timestamp_us);
+  void pushMedian(uint32_t* history, uint8_t& count, uint8_t& pos,
+                  uint32_t value);
+  static uint32_t median3(const uint32_t* history, uint8_t count);
+  uint32_t pulsesPerEighth() const;
+  uint32_t estimatedPulseUs() const;
+  void updateStopThreshold();
 
   uint32_t carrier_hz_ = 1;
-  ClockSource source_ = ClockSource::Internal;
-  ClockState state_ = ClockState::Unlocked;
-  uint8_t pulse_ppqn_ = 2;
-  bool midi_running_ = true;
+  uint8_t pulse_ppqn_ = 24;
+  bool restart_on_start_ = true;
+  ClockState state_ = ClockState::Stopped;
 
-  uint32_t internal_bpm_x100_ = 16500;
-  uint32_t measured_bpm_x100_ = 0;
-  uint32_t target_bpm_x100_ = 16500;
-  uint32_t filtered_quarter_us_ = 0;
-  uint64_t transport_increment_q32_ = 0;
-  uint64_t transport_phase_q32_ = 0;
-  int64_t slew_increment_q32_ = 0;
-  uint32_t slew_ticks_remaining_ = 0;
-  uint32_t pending_beats_ = 0;
-  uint32_t carriers_since_beat_ = 0;
-  bool suppress_next_wrap_ = false;
-
+  // Index of the next pulse to arrive; a pulse whose index is a multiple of
+  // pulsesPerEighth() is an eighth-note landmark.
+  uint32_t pulse_index_ = 0;
   bool have_edge_ = false;
-  uint32_t first_edge_us_ = 0;
   uint32_t last_edge_us_ = 0;
-  uint32_t holdover_started_us_ = 0;
-  uint32_t pulse_ordinal_ = 0;
-  uint8_t consecutive_valid_intervals_ = 0;
-  uint32_t interval_history_[5]{};
-  uint8_t interval_history_count_ = 0;
-  uint8_t interval_history_pos_ = 0;
-  uint32_t tempo_candidate_us_ = 0;
-  bool have_tempo_candidate_ = false;
 
+  uint32_t edge_history_[kEdgeHistory]{};
+  uint8_t edge_count_ = 0;
+  uint8_t edge_pos_ = 0;
+
+  uint32_t interval_history_[kMedianHistory]{};  // raw pulse intervals
+  uint8_t interval_count_ = 0;
+  uint8_t interval_pos_ = 0;
+
+  uint32_t quarter_history_[kMedianHistory]{};  // per-pulse tempo measurements
+  uint8_t quarter_count_ = 0;
+  uint8_t quarter_pos_ = 0;
+  uint32_t filtered_quarter_us_ = 0;
+
+  // Recomputed per pulse; advanceCarrier runs in the audio ISR.
+  uint32_t stop_threshold_us_ = 0;
   uint32_t jitter_us_ = 0;
-  int32_t phase_error_us_ = 0;
-  uint32_t max_phase_error_us_ = 0;
+  uint32_t pending_beats_ = 0;
+  bool pending_reset_ = false;         // waiting for the next pulse
+  bool position_reset_pending_ = false;  // handed to the audio engine
+  bool intermediate_pending_ = false;  // 1 PPQN off-beat eighth
+  uint32_t intermediate_due_us_ = 0;
+
   uint32_t accepted_events_ = 0;
-  uint32_t rejected_events_ = 0;
-  uint32_t missed_events_ = 0;
-  bool loop_restart_pending_ = false;
+  uint32_t restart_count_ = 0;
+  uint32_t reset_count_ = 0;
 };
 
-const char* clockSourceName(ClockSource source);
 const char* clockStateName(ClockState state);
 
 }  // namespace piko

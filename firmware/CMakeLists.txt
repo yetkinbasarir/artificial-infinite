@@ -41,7 +41,6 @@ function(add_pikocore_firmware TARGET_NAME OUTPUT_BASENAME FLASH_SIZE_BYTES)
 	pico_set_boot_stage2(${TARGET_NAME} slower_boot2)
 	set_target_properties(${TARGET_NAME} PROPERTIES OUTPUT_NAME "${OUTPUT_BASENAME}")
 	pico_generate_pio_header(${TARGET_NAME} ${CMAKE_CURRENT_LIST_DIR}/doth/WS2812.pio)
-	pico_generate_pio_header(${TARGET_NAME} ${CMAKE_CURRENT_LIST_DIR}/doth/onewiremidi.pio)
 
 	target_link_libraries(${TARGET_NAME}
 		pico_stdlib

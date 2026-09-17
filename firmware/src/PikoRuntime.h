@@ -5,8 +5,8 @@
 #include "ClockSync.h"
 
 enum class PikoRequestType : uint8_t {
-  SetClockMode,
   SetPulsePpqn,
+  SetRestartOnStart,
   StopPlayback,
   StartPlayback,
 };
@@ -19,13 +19,14 @@ struct PikoRequest {
 
 struct PikoClockSnapshot {
   piko::ClockDiagnostics clock;
+  uint32_t rejected_edges;  // filtered by the capture ISR
   uint32_t clock_queue_drops;
-  uint32_t midi_queue_drops;
+  uint32_t midi_queue_drops;  // USB MIDI note output only
 };
 
 // Core 1 request API. Completion is explicitly acknowledged by core 0.
-bool piko_request_clock_mode(bool midi);
 bool piko_request_pulse_ppqn(uint8_t ppqn);
+bool piko_request_restart_on_start(bool enabled);
 bool piko_request_stop_playback();
 bool piko_request_start_playback();
 

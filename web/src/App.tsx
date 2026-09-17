@@ -30,13 +30,15 @@ import {
 } from './bank';
 import {
   ClockDiagnostics,
+  DEFAULT_PULSE_PPQN,
   DeviceInfo,
+  PULSE_PPQN_VALUES,
   PikocoreSerial,
+  PulsePpqn,
   hasClockSync,
   isCompatibleFirmware,
   shouldPollClockDiagnostics,
 } from './serial';
-import ittybittymidiConnection from './assets/ittybittymidi_connection.jpg';
 import pikocoreInstructions from './assets/pikocore_instructions.png';
 
 const serial = new PikocoreSerial();
@@ -81,7 +83,6 @@ export function App() {
   const [playheadFrame, setPlayheadFrame] = useState(0);
   const [debugLog, setDebugLog] = useState<string[]>([]);
   const [debugOpen, setDebugOpen] = useState(false);
-  const [ittybittymidiInfoOpen, setIttybittymidiInfoOpen] = useState(false);
   const [clockDiagnostics, setClockDiagnostics] = useState<ClockDiagnostics | null>(null);
   const [theme] = useState<Theme>(() => loadTheme());
   const debugOpenRef = useRef(false);
@@ -603,26 +604,7 @@ export function App() {
     }
   }
 
-  async function setIttybittymidiMode(enabled: boolean) {
-    if (!connected || !device) return;
-    try {
-      await beginBusyOperation();
-      setStatus({ text: 'Saving clock input mode', kind: 'idle' });
-      await serial.setClockInputMode(enabled);
-      const info = await serial.info();
-      setDevice(info);
-      setStatus({
-        text: enabled ? 'Clock input set to ittybittymidi' : 'Clock input set to pulses',
-        kind: 'good',
-      });
-    } catch (error) {
-      setStatus({ text: errorMessage(error), kind: 'bad' });
-    } finally {
-      endBusyOperation();
-    }
-  }
-
-  async function setPulsePpqn(ppqn: 1 | 2 | 4) {
+  async function setPulsePpqn(ppqn: PulsePpqn) {
     if (!connected || !device || !hasClockSync(device)) return;
     try {
       await beginBusyOperation();
@@ -631,6 +613,25 @@ export function App() {
       const info = await serial.info();
       setDevice(info);
       setStatus({ text: `Pulse clock set to ${pulseDivisionLabel(ppqn)}`, kind: 'good' });
+    } catch (error) {
+      setStatus({ text: errorMessage(error), kind: 'bad' });
+    } finally {
+      endBusyOperation();
+    }
+  }
+
+  async function setRestartOnStart(enabled: boolean) {
+    if (!connected || !device || !hasClockSync(device)) return;
+    try {
+      await beginBusyOperation();
+      setStatus({ text: 'Saving clock start behaviour', kind: 'idle' });
+      await serial.setRestartOnStart(enabled);
+      const info = await serial.info();
+      setDevice(info);
+      setStatus({
+        text: enabled ? 'Clock start restarts from step 1' : 'Clock start keeps the current position',
+        kind: 'good',
+      });
     } catch (error) {
       setStatus({ text: errorMessage(error), kind: 'bad' });
     } finally {
@@ -892,47 +893,38 @@ export function App() {
           </button>
         </div>
         <div className="toolbar-subrow">
-          <div
-            className="clock-mode"
-          >
-            <label
-              className={!connected || incompatibleDevice != null || busy ? 'disabled' : ''}
-              title="Use serial MIDI from ittybittymidi on the clock input"
-            >
-              <input
-                type="checkbox"
-                checked={device?.ittybittymidiMode ?? false}
-                disabled={!connected || incompatibleDevice != null || busy}
-                onChange={(event) => void setIttybittymidiMode(event.currentTarget.checked)}
-              />
-              Ittybittymidi mode
-            </label>
-            <button
-              type="button"
-              className="text-button"
-              title="Learn more about ittybittymidi"
-              onClick={(event) => {
-                event.stopPropagation();
-                setIttybittymidiInfoOpen(true);
-              }}
-            >
-              more info
-            </button>
+          <div className="clock-mode">
             {hasClockSync(device) ? (
-              <label className={!connected || incompatibleDevice != null || busy ? 'disabled' : ''}>
-                Pulse division
-                <select
-                  value={device?.pulsePpqn ?? 2}
-                  disabled={!connected || incompatibleDevice != null || busy}
-                  onChange={(event) => void setPulsePpqn(Number(event.currentTarget.value) as 1 | 2 | 4)}
-                  title="Choose the pulse clock division"
-                  aria-label="Pulse clock division"
+              <>
+                <label className={!connected || incompatibleDevice != null || busy ? 'disabled' : ''}>
+                  Pulse division
+                  <select
+                    value={device?.pulsePpqn ?? DEFAULT_PULSE_PPQN}
+                    disabled={!connected || incompatibleDevice != null || busy}
+                    onChange={(event) => void setPulsePpqn(Number(event.currentTarget.value) as PulsePpqn)}
+                    title="Choose how many clock pulses the sequencer sends per quarter note"
+                    aria-label="Pulse clock division"
+                  >
+                    {PULSE_PPQN_VALUES.map((ppqn) => (
+                      <option key={ppqn} value={ppqn}>
+                        {pulseDivisionOption(ppqn)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label
+                  className={!connected || incompatibleDevice != null || busy ? 'disabled' : ''}
+                  title="Start from the first step whenever the clock starts again"
                 >
-                  <option value={1}>Quarter note (1 PPQN)</option>
-                  <option value={2}>Eighth note (2 PPQN)</option>
-                  <option value={4}>Sixteenth note (4 PPQN)</option>
-                </select>
-              </label>
+                  <input
+                    type="checkbox"
+                    checked={device?.restartOnStart ?? true}
+                    disabled={!connected || incompatibleDevice != null || busy}
+                    onChange={(event) => void setRestartOnStart(event.currentTarget.checked)}
+                  />
+                  Restart from step 1 when clock starts
+                </label>
+              </>
             ) : null}
           </div>
         </div>
@@ -948,14 +940,13 @@ export function App() {
             <dl>
               <div><dt>Source</dt><dd>{clockDiagnostics.source}</dd></div>
               <div><dt>State</dt><dd>{clockDiagnostics.state}</dd></div>
-              <div><dt>Measured</dt><dd>{(clockDiagnostics.bpmX100 / 100).toFixed(2)} BPM</dd></div>
-              <div><dt>Target</dt><dd>{(clockDiagnostics.targetBpmX100 / 100).toFixed(2)} BPM</dd></div>
+              <div><dt>Tempo</dt><dd>{(clockDiagnostics.bpmX100 / 100).toFixed(2)} BPM</dd></div>
               <div><dt>Jitter</dt><dd>{clockDiagnostics.jitterUs} µs</dd></div>
-              <div><dt>Phase error</dt><dd>{clockDiagnostics.phaseErrorUs} µs</dd></div>
-              <div><dt>Maximum phase error</dt><dd>{clockDiagnostics.maxPhaseErrorUs} µs</dd></div>
               <div><dt>Last edge age</dt><dd>{clockDiagnostics.lastEdgeAgeUs} µs</dd></div>
               <div><dt>PPQN</dt><dd>{clockDiagnostics.ppqn}</dd></div>
-              <div><dt>Events</dt><dd>{clockDiagnostics.accepted} accepted / {clockDiagnostics.rejected} rejected / {clockDiagnostics.missed} missed</dd></div>
+              <div><dt>Edges</dt><dd>{clockDiagnostics.accepted} accepted / {clockDiagnostics.rejected} rejected</dd></div>
+              <div><dt>Restarts</dt><dd>{clockDiagnostics.restartCount}</dd></div>
+              <div><dt>Resets</dt><dd>{clockDiagnostics.resetCount}</dd></div>
               <div><dt>Queue drops</dt><dd>{clockDiagnostics.clockQueueDrops} clock / {clockDiagnostics.midiQueueDrops} MIDI</dd></div>
             </dl>
           ) : (
@@ -978,38 +969,6 @@ export function App() {
           </p>
           <p>Required firmware: {requiredFirmwareLabel}. Use the UF2 download button above.</p>
         </section>
-      ) : null}
-
-      {ittybittymidiInfoOpen ? (
-        <div className="modal-backdrop" role="presentation" onClick={() => setIttybittymidiInfoOpen(false)}>
-          <div
-            className="info-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="ittybittymidi clock input"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <img src={ittybittymidiConnection} alt="ittybittymidi connected to a pikocore clock input" />
-            <div className="info-modal-copy">
-              <h2>ittybittymidi mode</h2>
-              <p>
-                If you have an ittybittymidi, enable this mode to send TRS MIDI directly into the pikocore clock input.
-                Without it, leave this unchecked and use the clock input for pulses; USB MIDI still works either way.
-              </p>
-              <a href="https://infinitedigits.co/ittybittymidi/" title="Open the ittybittymidi page">
-                ittybittymidi details
-              </a>
-            </div>
-            <button
-              className="modal-close"
-              onClick={() => setIttybittymidiInfoOpen(false)}
-              title="Close ittybittymidi info"
-              aria-label="Close ittybittymidi info"
-            >
-              Close
-            </button>
-          </div>
-        </div>
       ) : null}
 
       <section className="capacity">
@@ -1299,10 +1258,23 @@ function formatDuration(frames: number): string {
   return `${(frames / BANK_SAMPLE_RATE).toFixed(2)} s`;
 }
 
-function pulseDivisionLabel(ppqn: 1 | 2 | 4): string {
-  if (ppqn === 1) return 'quarter notes';
-  if (ppqn === 4) return 'sixteenth notes';
-  return 'eighth notes';
+function pulseDivisionLabel(ppqn: PulsePpqn): string {
+  return `${ppqn} PPQN`;
+}
+
+function pulseDivisionOption(ppqn: PulsePpqn): string {
+  switch (ppqn) {
+    case 1:
+      return '1 PPQN (quarter)';
+    case 2:
+      return '2 PPQN (eighth · Korg SQ-1/Volca)';
+    case 4:
+      return '4 PPQN (sixteenth)';
+    case 24:
+      return '24 PPQN (Blackbox default)';
+    default:
+      return `${ppqn} PPQN`;
+  }
 }
 
 function formatEta(ms: number): string {

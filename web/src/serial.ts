@@ -10,8 +10,8 @@ export interface DeviceInfo {
   usedBytes: number;
   sampleRate: number;
   sampleCount: number;
-  ittybittymidiMode: boolean;
-  pulsePpqn?: 1 | 2 | 4;
+  pulsePpqn?: PulsePpqn;
+  restartOnStart?: boolean;
   clockSyncVersion?: number;
   protocolVersion?: number;
   bankVersion?: number;
@@ -20,26 +20,30 @@ export interface DeviceInfo {
   raw: string;
 }
 
+export type PulsePpqn = 1 | 2 | 4 | 8 | 12 | 24 | 48;
+
+export const PULSE_PPQN_VALUES: readonly PulsePpqn[] = [1, 2, 4, 8, 12, 24, 48];
+
+export const DEFAULT_PULSE_PPQN: PulsePpqn = 24;
+
 export interface ClockDiagnostics {
-  source: 'INTERNAL' | 'PULSE' | 'MIDI';
-  state: 'UNLOCKED' | 'ACQUIRING' | 'LOCKED' | 'HOLDOVER';
+  source: 'PULSE';
+  state: 'STOPPED' | 'RUNNING';
   bpmX100: number;
-  targetBpmX100: number;
   jitterUs: number;
-  phaseErrorUs: number;
-  maxPhaseErrorUs: number;
   lastEdgeAgeUs: number;
   ppqn: number;
   accepted: number;
   rejected: number;
-  missed: number;
+  restartCount: number;
+  resetCount: number;
   clockQueueDrops: number;
   midiQueueDrops: number;
   raw: string;
 }
 
 export function hasClockSync(info: DeviceInfo | null): boolean {
-  return info?.clockSyncVersion === 1;
+  return (info?.clockSyncVersion ?? 0) >= 1;
 }
 
 export function shouldPollClockDiagnostics(
@@ -52,8 +56,12 @@ export function shouldPollClockDiagnostics(
 }
 
 export function pulsePpqnCommand(ppqn: number): Uint8Array {
-  if (ppqn !== 1 && ppqn !== 2 && ppqn !== 4) throw new Error(`Invalid pulse PPQN ${ppqn}`);
+  if (!PULSE_PPQN_VALUES.includes(ppqn as PulsePpqn)) throw new Error(`Invalid pulse PPQN ${ppqn}`);
   return new Uint8Array([0x50, ppqn]);
+}
+
+export function restartOnStartCommand(enabled: boolean): Uint8Array {
+  return new Uint8Array([0x54, enabled ? 1 : 0]);
 }
 
 export function isCompatibleFirmware(info: DeviceInfo): boolean {
@@ -238,19 +246,18 @@ export class PikocoreSerial {
     if (line !== 'OK') throw new Error(`Stop rejected: ${line}`);
   }
 
-  async setClockInputMode(ittybittymidiMode: boolean): Promise<void> {
-    await this.sync();
-    await this.writeString('C');
-    await this.write(new Uint8Array([ittybittymidiMode ? 1 : 0]));
-    const line = await this.waitForLine(COMMAND_TIMEOUT_MS);
-    if (line !== 'OK') throw new Error(`Clock input setting rejected: ${line}`);
-  }
-
-  async setPulsePpqn(ppqn: 1 | 2 | 4): Promise<void> {
+  async setPulsePpqn(ppqn: PulsePpqn): Promise<void> {
     await this.sync();
     await this.write(pulsePpqnCommand(ppqn));
     const line = await this.waitForLine(COMMAND_TIMEOUT_MS);
     if (line !== 'OK') throw new Error(`Pulse PPQN setting rejected: ${line}`);
+  }
+
+  async setRestartOnStart(enabled: boolean): Promise<void> {
+    await this.sync();
+    await this.write(restartOnStartCommand(enabled));
+    const line = await this.waitForLine(COMMAND_TIMEOUT_MS);
+    if (line !== 'OK') throw new Error(`Restart-on-start setting rejected: ${line}`);
   }
 
   async clockDiagnostics(skipSync = false): Promise<ClockDiagnostics> {
@@ -494,8 +501,8 @@ export function parseInfo(text: string): DeviceInfo {
     usedBytes: Number(token(['USED', 'U'], '0')),
     sampleRate: Number(token(['RATE', 'SR'], '24000')),
     sampleCount: Number(token(['COUNT', 'N'], '0')),
-    ittybittymidiMode: token(['CLOCK_INPUT', 'CI'], 'CLOCK') === 'MIDI',
     pulsePpqn: parsePulsePpqn(numberToken('PULSE_PPQN')),
+    restartOnStart: parseRestartOnStart(numberToken('RESTART_ON_START')),
     clockSyncVersion: numberToken('CLOCK_SYNC_VERSION'),
     protocolVersion: numberToken('PROTO'),
     bankVersion: numberToken('BANK_VERSION'),
@@ -505,8 +512,14 @@ export function parseInfo(text: string): DeviceInfo {
   };
 }
 
-function parsePulsePpqn(value: number | undefined): 1 | 2 | 4 | undefined {
-  return value === 1 || value === 2 || value === 4 ? value : undefined;
+function parsePulsePpqn(value: number | undefined): PulsePpqn | undefined {
+  return PULSE_PPQN_VALUES.includes(value as PulsePpqn) ? (value as PulsePpqn) : undefined;
+}
+
+function parseRestartOnStart(value: number | undefined): boolean | undefined {
+  if (value === 1) return true;
+  if (value === 0) return false;
+  return undefined;
 }
 
 export function parseClockDiagnostics(text: string): ClockDiagnostics {
@@ -525,25 +538,23 @@ export function parseClockDiagnostics(text: string): ClockDiagnostics {
   };
   const source = token('SOURCE');
   const state = token('STATE');
-  if (source !== 'INTERNAL' && source !== 'PULSE' && source !== 'MIDI') {
+  if (source !== 'PULSE') {
     throw new Error(`Invalid clock source ${source}`);
   }
-  if (state !== 'UNLOCKED' && state !== 'ACQUIRING' && state !== 'LOCKED' && state !== 'HOLDOVER') {
+  if (state !== 'STOPPED' && state !== 'RUNNING') {
     throw new Error(`Invalid clock state ${state}`);
   }
   return {
     source,
     state,
     bpmX100: numberToken('BPM_X100'),
-    targetBpmX100: numberToken('TARGET_BPM_X100'),
     jitterUs: numberToken('JITTER_US'),
-    phaseErrorUs: numberToken('PHASE_ERROR_US'),
-    maxPhaseErrorUs: numberToken('MAX_PHASE_ERROR_US'),
     lastEdgeAgeUs: numberToken('LAST_EDGE_AGE_US'),
     ppqn: numberToken('PPQN'),
     accepted: numberToken('ACCEPTED'),
     rejected: numberToken('REJECTED'),
-    missed: numberToken('MISSED'),
+    restartCount: numberToken('RESTART_COUNT'),
+    resetCount: numberToken('RESET_COUNT'),
     clockQueueDrops: numberToken('CLOCK_QUEUE_DROPS'),
     midiQueueDrops: numberToken('MIDI_QUEUE_DROPS'),
     raw: text,

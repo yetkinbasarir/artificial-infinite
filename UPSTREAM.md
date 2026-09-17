@@ -8,13 +8,15 @@
 The first commit in this repository is an unmodified snapshot of upstream at
 that commit. The second commit restructures it into a 2 MB-only base.
 
-**Firmware behaviour is identical to the upstream 2 MB build**
-(`pikocore_2mb`, `PICO_FLASH_SIZE_BYTES=2097152`), **with one exception:**
-the boot2 flash SPI clock divider was raised from 2 to 4 (see below). Audio
-engine, clock, USB protocol and descriptors, `USBD_MANUFACTURER`/`USBD_PRODUCT`
-strings, the `PIKO1 ...` INFO reply, bank format (v2, 12288-byte header,
-128 samples, 24 kHz) and `PIKO_FIRMWARE_RESERVE=524288` are unchanged. Apart
-from that exception, known upstream bugs were intentionally not fixed.
+Up to and including commit `43686b4` the firmware behaved like the upstream
+2 MB build (`pikocore_2mb`, `PICO_FLASH_SIZE_BYTES=2097152`), the boot2 flash
+clock divider being the only exception. **Phase 1 deliberately departs from
+upstream**: the clock system was rebuilt for external analog clocks (see
+below). What still matches upstream is the audio engine and effects, the bank
+format (v2, 12288-byte header, 128 samples, 24 kHz), the USB bank protocol,
+USB descriptors, `USBD_MANUFACTURER`/`USBD_PRODUCT`, the `PIKO1 ...` INFO
+header and `PIKO_FIRMWARE_RESERVE=524288`. Outside the clock rework, known
+upstream bugs were intentionally not fixed.
 
 ### Exception: boot2 flash SPI clock divider 2 → 4 (commit `43686b4`)
 
@@ -68,6 +70,45 @@ binary; the code is otherwise unchanged.
   selector removed. Also changed: package name `artificial-infinite-loader`,
   page title "Artificial Infinite", and Vite `base` read from `VITE_BASE`.
   Serial, bank and protocol code is unchanged.
+
+## Phase 1: conventional external clock
+
+The clock system was rebuilt around a conventional analog pulse clock so that
+several boards can be run in sync. Audio engine, effects, bank format and the
+USB bank protocol (R/W/E/I/S/B/U/X/D) are unchanged.
+
+Removed:
+
+- Internal tempo: `param_set_bpm`, the knob B tempo control (selector 8 is now
+  an empty slot), the `SAVE_BPM` record and the LED tempo readout.
+- MIDI clock and one-wire MIDI input: `doth/onewiremidi.{h,pio}`, the PIO1 IRQ
+  and byte queue, MIDI note-in, the `MIDI_*` build options, the `C` serial
+  command and the stored clock-input mode. USB MIDI note output stays.
+- Trigger output: `doth/trigger_out.h` and the `TRIGO_PIN` output.
+- The lock-clock button combination (1+2+5+6); its behaviour is now the only
+  mode, so the position always comes from the global beat counter.
+- The old PLL/slew/holdover clock recovery, its missed-pulse estimation and
+  tempo-candidate logic.
+
+Added or changed:
+
+- Clock input on GPIO 22 and a new reset input on GPIO 21, both pulled up and
+  captured on the falling edge, with glitch filtering in the ISR (300 µs for
+  clock, 50 ms for reset). GPIO 23 is driven high, so `WS2812_ENABLED=0`.
+- Beats are eighth notes emitted at edge time. 1, 2, 4, 8, 12, 24 and 48 PPQN
+  are supported (default 24); 1 PPQN interpolates the off-beat eighth from the
+  tempo estimate.
+- Stop detection from an adaptive threshold (2.5 times the median of the last
+  three intervals, at least 250 ms), plus restart-on-start and reset-input
+  alignment. `SAVE_RESTART_ON_START` stores the setting; the new `T` command
+  sets it.
+- `INFO` drops `CLOCK_INPUT`, reports `CLOCK_SYNC_VERSION 2` and adds
+  `RESTART_ON_START`. The `D` diagnostics line reports the new state machine.
+- `handle_write` answers `ERR` when the written bank does not read back as
+  valid.
+- Web loader: pulse-division selector with the seven divisions, a
+  restart-on-start checkbox, updated diagnostics, and the ittybittymidi mode
+  control removed.
 
 ## Pulling changes from upstream
 

@@ -3,10 +3,7 @@ if(NOT DEFINED PIKOCODE_TARGET)
 endif()
 
 target_compile_definitions(${PIKOCODE_TARGET} PRIVATE
-    WS2812_ENABLED=1
-    MIDI_IN_ENABLED=0
-    MIDI_RESET_EVERY_BEAT=16
-    MIDI_CLOCK_MULTIPLIER=2
-    MIDI_NOTE_KEY=0
+    # GPIO 23 is driven high for the SMPS, so the WS2812 output is off.
+    WS2812_ENABLED=0
     PCB_V2_LAYOUT=0
 )

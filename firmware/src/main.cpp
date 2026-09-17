@@ -29,9 +29,7 @@
 #include "doth/knob.h"
 #include "doth/led.h"
 #include "doth/ledarray.h"
-#include "doth/onewiremidi.h"
 #include "doth/sequencer.h"
-#include "doth/trigger_out.h"
 
 // constants
 #define CLOCK_RATE 248000
@@ -52,9 +50,8 @@
 #ifdef PICO_DEFAULT_LED_PIN
 #define LED_PIN PICO_DEFAULT_LED_PIN
 #endif
-#define CLOCK_PIN 22  // clock in pin
-#define TRIGO_PIN 21  // trigger out pin
-#define MAIN_LOOP_HZ 4
+#define CLOCK_PIN 22  // analog clock in pin (inverted input stage)
+#define RESET_PIN 21  // reset in pin (inverted input stage)
 #define MAIN_LOOP_DELAY 50
 
 #if WS2812_ENABLED == 1
@@ -68,7 +65,6 @@
 // https://github.com/raspberrypi/pico-examples/blob/master/flash/program/flash_program.c
 // https://kevinboone.me/picoflash.html
 #define SAVE_VOLUME 0  // needs two bytes
-#define SAVE_BPM 2     // needs two bytes
 #define SAVE_FILTER 4  // needs one byte
 #define SAVE_SAMPLE 5  // needs one byte
 #define SAVE_GATE 6    // needs two bytes
@@ -77,10 +73,12 @@
 #define SAVE_PROB_JUMP 10
 #define SAVE_PROB_GATE 11
 #define SAVE_PROB_TUNNEL 12
-#define SAVE_CLOCK_INPUT_MODE 13
 #define SAVE_PULSE_PPQN 14
-#define CLOCK_INPUT_CLOCK 0
-#define CLOCK_INPUT_MIDI 1
+// Stored as 1 = restart on start, 2 = keep position. 0 means "never written"
+// and loads as the default, so settings pages from older firmware behave.
+#define SAVE_RESTART_ON_START 15
+#define RESTART_ON_START_ENABLED 1
+#define RESTART_ON_START_DISABLED 2
 #define MIDI_NOTES_AVAILABLE_TOTAL 28
 static constexpr uint32_t kKnobMax = 4095u;
 static constexpr uint32_t kStretchQ8One = 256u;
@@ -107,8 +105,6 @@ Knob input_knob[NUM_KNOBS];
 
 // outputs
 LEDArray ledarray;
-
-TriggerOut output_trigger;
 
 // audio tracking
 uint8_t audio_now = 0;
@@ -163,11 +159,8 @@ TimestretchGrain timestretch_grains[2] = {
 uint8_t timestretch_audio_now = 128;
 bool timestretch_active = false;
 bool timestretch_grains_initialized = false;
-bool do_lock_clock = false;
 
 // beat tracking (beat = eighth-note)
-uint16_t bpm_set = 79;
-uint16_t internal_bpm_set = 165;
 uint32_t beat_num_total = 0;
 bool beat_onset = false;
 bool beat_led = 0;
@@ -216,22 +209,22 @@ bool button_trigger[8] = {false, false, false, false,
 // sequencer
 Sequencer sequencer;
 
-// midi handler
-Onewiremidi *onewiremidi;
-int8_t midi_button1 = -1;
-int8_t midi_button2 = -1;
-volatile bool clock_input_ittybittymidi = false;
-volatile uint8_t pulse_ppqn = 2;
+// clock input
+volatile uint8_t pulse_ppqn = 24;
+volatile bool restart_on_start = true;
 
-struct MidiByteEvent {
-  uint8_t byte;
-  uint32_t timestamp_us;
-};
+// Glitch filtering lives in the capture ISR. 300 us is well under the shortest
+// legal spacing (2083 us at 48 PPQN / 300 BPM); resets debounce far slower.
+static constexpr uint32_t kClockGlitchUs = 300u;
+static constexpr uint32_t kResetGlitchUs = 50000u;
+volatile uint32_t clock_rejected_edges = 0;
 
 piko::ClockSync clock_sync;
 SpscQueue<piko::ClockEvent, 32> clock_event_queue;
-SpscQueue<MidiByteEvent, 64> midi_byte_queue;
 uint32_t core1_stack[2048] __attribute__((aligned(8)));
+
+// Playback goes silent once a slice has run its length without a new beat.
+uint32_t slice_frames_remaining = 0;
 
 inline void set_audio_pwm_level(uint8_t level) {
   pwm_set_gpio_level(AUDIO_PIN,
@@ -278,7 +271,13 @@ void param_set_break(uint16_t knob_val, uint8_t &filter_fc_,
 }
 
 void update_playback_rate() {
-  playback_target_bpm_x100 = clock_sync.targetBpmX100();
+  // Until the external clock has been measured, play the sample at its own
+  // recorded tempo; the following pulses correct it.
+  uint32_t bpm_x100 = clock_sync.targetBpmX100();
+  if (bpm_x100 == 0) {
+    bpm_x100 = static_cast<uint32_t>(sample_source_bpm) * 100u;
+  }
+  playback_target_bpm_x100 = bpm_x100;
   playback_increment_q32 = piko::ClockSync::playbackIncrementQ32(
       pwm_carrier_hz, playback_target_bpm_x100, sample_source_bpm);
   if (playback_increment_q32 == 0) playback_increment_q32 = 1;
@@ -296,19 +295,6 @@ void update_playback_rate() {
   if (playback_effective_increment_q32 == 0) {
     playback_effective_increment_q32 = 1;
   }
-}
-
-void param_set_bpm(uint16_t bpm) {
-  if (bpm < 30 || bpm > 360) return;
-  const uint32_t interrupts = save_and_disable_interrupts();
-  internal_bpm_set = bpm;
-  clock_sync.setInternalBpmX100(static_cast<uint32_t>(bpm) * 100u);
-  bpm_set = static_cast<uint16_t>((clock_sync.targetBpmX100() + 50u) / 100u);
-  update_playback_rate();
-  restore_interrupts(interrupts);
-#ifdef DEBUG_BPM
-  printf("new bpm: %d\n", bpm_set);
-#endif
 }
 
 void param_set_volume(uint16_t knobval, uint8_t &distortion_,
@@ -377,6 +363,19 @@ void refresh_sample_timing(uint16_t sample_index) {
     sample_source_bpm = BPM_SAMPLED;
   }
   update_playback_rate();
+}
+
+// Each beat starts a slice. If the clock is slower than the slice, the slice
+// plays its own length and then goes silent until the next beat.
+void restart_slice_window() {
+  uint64_t frames = static_cast<uint64_t>(sample_frames_per_slice)
+                    << flag_half_time;
+  if (timestretch_active && timestretch_applied_q8 > kStretchQ8One) {
+    frames = (frames * timestretch_applied_q8) >> 8u;
+  }
+  if (frames == 0) frames = 1;
+  if (frames > 0xfffffffful) frames = 0xfffffffful;
+  slice_frames_remaining = static_cast<uint32_t>(frames);
 }
 
 uint32_t stretch_from_knob_q8(uint16_t knob) {
@@ -606,95 +605,57 @@ void restart_loop_from_beginning() {
 }
 
 void clock_gpio_irq_handler(uint gpio, uint32_t events) {
-  if (gpio == CLOCK_PIN && (events & GPIO_IRQ_EDGE_FALL) != 0 &&
-      !clock_input_ittybittymidi) {
-    clock_event_queue.push(
-        {piko::ClockEventType::Pulse, time_us_32()});
+  if ((events & GPIO_IRQ_EDGE_FALL) == 0) return;
+  // The external input stage inverts: a rising edge on the jack is a falling
+  // edge here.
+  const uint32_t now_us = time_us_32();
+  if (gpio == CLOCK_PIN) {
+    static uint32_t last_clock_us = 0;
+    static bool have_clock = false;
+    if (have_clock && now_us - last_clock_us < kClockGlitchUs) {
+      ++clock_rejected_edges;
+      return;
+    }
+    last_clock_us = now_us;
+    have_clock = true;
+    clock_event_queue.push({piko::ClockEventType::Pulse, now_us});
+  } else if (gpio == RESET_PIN) {
+    static uint32_t last_reset_us = 0;
+    static bool have_reset = false;
+    if (have_reset && now_us - last_reset_us < kResetGlitchUs) {
+      ++clock_rejected_edges;
+      return;
+    }
+    last_reset_us = now_us;
+    have_reset = true;
+    clock_event_queue.push({piko::ClockEventType::Reset, now_us});
   }
 }
 
-void midi_pio_irq_handler() {
-  while (!pio_sm_is_rx_fifo_empty(pio1, 0)) {
-    const uint32_t timestamp_us = time_us_32();
-    const uint8_t byte = Onewiremidi_decode(pio_sm_get(pio1, 0));
-    piko::ClockEventType type{};
-    bool is_clock_event = true;
-    switch (byte) {
-      case MIDI_TIMING_CLOCK:
-        type = piko::ClockEventType::MidiClock;
-        break;
-      case MIDI_START:
-        type = piko::ClockEventType::MidiStart;
-        break;
-      case MIDI_CONTINUE:
-        type = piko::ClockEventType::MidiContinue;
-        break;
-      case MIDI_STOP:
-        type = piko::ClockEventType::MidiStop;
-        break;
-      default:
-        is_clock_event = false;
-        break;
-    }
-    if (is_clock_event) {
-      clock_event_queue.push({type, timestamp_us});
-    } else {
-      midi_byte_queue.push({byte, timestamp_us});
-    }
-  }
-}
-
-void configure_clock_capture(bool midi) {
+void configure_clock_capture() {
   const uint32_t interrupts = save_and_disable_interrupts();
-  gpio_set_irq_enabled(CLOCK_PIN, GPIO_IRQ_EDGE_FALL, false);
-  pio_set_irq0_source_enabled(pio1, pis_sm0_rx_fifo_not_empty, false);
-  Onewiremidi_set_enabled(onewiremidi, false);
   clock_event_queue.clear();
-  midi_byte_queue.clear();
-  gpio_acknowledge_irq(CLOCK_PIN, GPIO_IRQ_EDGE_FALL);
-
-  clock_input_ittybittymidi = midi;
-  if (midi) {
-    pio_gpio_init(pio1, CLOCK_PIN);
-    pio_sm_set_consecutive_pindirs(pio1, 0, CLOCK_PIN, 1, false);
-    Onewiremidi_set_enabled(onewiremidi, true);
-    pio_set_irq0_source_enabled(pio1, pis_sm0_rx_fifo_not_empty, true);
-    clock_sync.setSource(piko::ClockSource::Midi, pulse_ppqn, time_us_32());
-  } else {
-    gpio_set_function(CLOCK_PIN, GPIO_FUNC_SIO);
-    gpio_set_dir(CLOCK_PIN, GPIO_IN);
-    gpio_pull_down(CLOCK_PIN);
-    gpio_set_irq_enabled(CLOCK_PIN, GPIO_IRQ_EDGE_FALL, true);
-    clock_sync.setSource(piko::ClockSource::Pulse, pulse_ppqn, time_us_32());
-  }
+  clock_sync.setPulsePpqn(pulse_ppqn);
+  clock_sync.setRestartOnStart(restart_on_start);
   update_playback_rate();
   restore_interrupts(interrupts);
 }
 
 bool service_clock_transport(uint32_t& now_us) {
   piko::ClockEvent event{};
+  bool had_pulse = false;
   while (clock_event_queue.pop(event)) {
     // Keep the carrier's cached time at least as new as the latest timestamp.
     // GPIO capture can preempt PWM after its queue check but before this drain.
     now_us = event.timestamp_us;
-    if (event.type == piko::ClockEventType::MidiStart ||
-        event.type == piko::ClockEventType::MidiContinue) {
-      do_start_everything();
-      soft_sync = false;
-      btn_reset = false;
-    } else if (event.type == piko::ClockEventType::MidiStop) {
-      do_stop_everything();
-      soft_sync = false;
-      btn_reset = false;
-    }
+    if (event.type == piko::ClockEventType::Pulse) had_pulse = true;
     clock_sync.process(event);
-    if (clock_sync.consumeLoopRestart()) {
+    if (clock_sync.consumePositionReset()) {
       restart_loop_from_beginning();
     }
   }
-  const uint32_t target = clock_sync.targetBpmX100();
-  if (target != playback_target_bpm_x100) {
-    bpm_set = static_cast<uint16_t>((target + 50u) / 100u);
+  // Every accepted pulse refreshes the tempo estimate the sample rate follows.
+  if (had_pulse) {
     update_playback_rate();
   }
   return clock_sync.advanceCarrier(now_us);
@@ -714,13 +675,15 @@ void pwm_interrupt_handler() {
   }
   const bool transport_beat = service_clock_transport(cached_now_us);
 
-  // Match the legacy external-clock pause: after two missing expected pulses,
-  // hold the current sample position and mute until capture resumes. Clock
-  // processing remains first so the returning landmark restarts immediately.
-  if (clock_sync.transportPaused()) {
-    set_audio_pwm_level(128);
-    return;
+  // A stopped clock produces no new beats; the slice in flight finishes on its
+  // own length below and the beat LED goes dark.
+  static bool clock_was_running = false;
+  const bool clock_running = clock_sync.state() == piko::ClockState::Running;
+  if (clock_was_running && !clock_running) {
+    beat_led = 0;
+    gpio_put(LED_PIN, 0);
   }
+  clock_was_running = clock_running;
 
   if (piko_audio_bank_mutating() || piko_audio_sample_count() == 0) {
     if (transport_beat) {
@@ -775,12 +738,12 @@ void pwm_interrupt_handler() {
     beat_onset = true;
     beat_led = 1 - beat_led;
     noise_gate_val = 0;
+    restart_slice_window();
     if (btn_reset) {
       beat_led = 1;
       beat_num_total = 0;
     }
     gpio_put(LED_PIN, beat_led);
-    output_trigger.Trigger();
 
     if (do_mute_debounce > 0) {
       do_mute_debounce--;
@@ -859,7 +822,8 @@ void pwm_interrupt_handler() {
     }
     if (!fx_retrig) {
 #ifdef DEBUG_PWM
-      printf("[%d bpm / beat_num: %d] ", bpm_set, beat_num_total);
+      printf("[%d bpm_x100 / beat_num: %d] ", playback_target_bpm_x100,
+             beat_num_total);
 #endif
 
       // check for fx
@@ -951,6 +915,7 @@ void pwm_interrupt_handler() {
   playback_phase_q32 += playback_effective_increment_q32;
   const bool audio_tick = playback_phase_q32 >= (1ull << 32u);
   if (audio_tick) playback_phase_q32 -= 1ull << 32u;
+  if (audio_tick && slice_frames_remaining > 0) --slice_frames_remaining;
   if (!audio_tick && !beat_onset) {
     set_audio_pwm_level(audio_now);
     return;
@@ -996,13 +961,12 @@ void pwm_interrupt_handler() {
         }
         sample = (sample_set + sample_add) % piko_audio_sample_count();
         refresh_sample_timing(sample);
+        restart_slice_window();
 
         beat_onset = false;
-        if (do_lock_clock) {
-          select_beat = beat_num_total % sample_beats;
-        } else {
-          select_beat++;
-        }
+        // Position always comes from the global beat counter, so boards fed
+        // the same clock and reset land on the same slice.
+        select_beat = beat_num_total % sample_beats;
         if (flag_half_time) {
           select_beat++;
           if (select_beat % 2 > 0)
@@ -1183,6 +1147,7 @@ void pwm_interrupt_handler() {
           phase_sample[phase_head] =
               select_beat * (sample_frames_per_slice << flag_half_time);
           phase_retrig = 0;
+          restart_slice_window();
         }
       }
     }
@@ -1215,6 +1180,9 @@ void pwm_interrupt_handler() {
       // }
     }
   }
+
+  // The slice has run its length and the next beat has not arrived yet.
+  if (slice_frames_remaining == 0) audio_now = 128;
 
     // <volume>
     if (volume_reduce >= VOLUME_REDUCE_MAX) audio_now = 128;
@@ -1354,39 +1322,9 @@ uint16_t *sort_int32_t(uint32_t array[], int n) {
 uint32_t note_hit[MIDI_MAX_NOTES];
 bool note_on[MIDI_MAX_NOTES];
 
-void midi_note_off(uint8_t note) {
-#ifdef DEBUG_MIDI
-  printf("note_off: %d\n", note);
-#endif
-#if MIDI_NOTE_KEY == 1
-  input_button[note % NUM_BUTTONS].Set(false);
-  if (midi_button2 > -1) {
-    midi_button2 = -1;
-  } else {
-    midi_button1 = -1;
-  }
-#endif
-}
-
-void midi_note_on(uint8_t note, uint8_t velocity) {
-#ifdef DEBUG_MIDI
-  printf("note_on: %d\n", note);
-#endif
-#if MIDI_NOTE_KEY == 1
-  if (midi_button1 > -1) {
-    midi_button2 = note % NUM_BUTTONS;
-  } else {
-    midi_button1 = note % NUM_BUTTONS;
-  }
-  input_button[note % NUM_BUTTONS].Set(true);
-#endif
-}
-
-bool piko_clock_input_ittybittymidi() {
-  return clock_input_ittybittymidi;
-}
-
 uint8_t piko_pulse_ppqn() { return pulse_ppqn; }
+
+bool piko_restart_on_start() { return restart_on_start; }
 
 int main(void) {
   // TinyUSB is initialized and serviced exclusively by core 1.
@@ -1421,18 +1359,21 @@ int main(void) {
   clock_sync.setCarrierHz(pwm_carrier_hz);
 
   if (piko_audio_sample_count() > 0) refresh_sample_timing(0);
-  param_set_bpm(BPM_SAMPLED);
 
   // setup gpio pins
   gpio_init(LED_PIN);
   gpio_set_dir(LED_PIN, GPIO_OUT);
+  // Both inputs sit behind an inverting NPN stage and idle high.
   gpio_init(CLOCK_PIN);
   gpio_set_dir(CLOCK_PIN, GPIO_IN);
-  gpio_pull_down(CLOCK_PIN);
+  gpio_pull_up(CLOCK_PIN);
+  gpio_init(RESET_PIN);
+  gpio_set_dir(RESET_PIN, GPIO_IN);
+  gpio_pull_up(RESET_PIN);
+  // Hold the SMPS in PWM mode for a quieter rail.
   gpio_init(23);
-  gpio_pull_up(23);
   gpio_set_dir(23, GPIO_OUT);
-  gpio_put(23, 0);
+  gpio_put(23, 1);
 
   // initialize buttons
   for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
@@ -1456,17 +1397,13 @@ int main(void) {
   // // save defaults that aren't defaulted to 0
   save_data[SAVE_VOLUME] = (uint8_t)(2500 >> 8);
   save_data[SAVE_VOLUME + 1] = (uint8_t)2500;
-  save_data[SAVE_BPM] = (uint8_t)(165 >> 8);
-  save_data[SAVE_BPM + 1] = (uint8_t)165;
   noise_gate_thresh = gate_default_thresh();
   noise_gate_thresh_use = noise_gate_thresh;
   save_data[SAVE_GATE] = (uint8_t)(noise_gate_thresh >> 8);
   save_data[SAVE_GATE + 1] = (uint8_t)noise_gate_thresh;
-  save_data[SAVE_CLOCK_INPUT_MODE] = CLOCK_INPUT_CLOCK;
-  save_data[SAVE_PULSE_PPQN] = 2;
-
-  // initializer trigger
-  output_trigger.Init(TRIGO_PIN, 10, MAIN_LOOP_HZ);
+  save_data[SAVE_PULSE_PPQN] = pulse_ppqn;
+  save_data[SAVE_RESTART_ON_START] =
+      restart_on_start ? RESTART_ON_START_ENABLED : RESTART_ON_START_DISABLED;
 
   // initialize control loop variables
   uint32_t clock_ms = 0;
@@ -1476,12 +1413,9 @@ int main(void) {
   uint32_t ledarray_sel_debounce = 0;
   uint16_t ledarray_save = 0;
   uint16_t ledarray_load = 0;
-  uint32_t ledarray_binary_debounce = 0;
-  uint8_t ledarray_binary = 0;
 
   // debouncing
   uint16_t debounce_sample = 0;
-  uint16_t debounce_lock_clock = 0;
   uint32_t debounce_saving = 0;
   uint32_t debounce_led_save = 0;
   uint8_t debounce_led_sequencer = 0;
@@ -1506,18 +1440,13 @@ int main(void) {
     restore_interrupts(ints);
   };
 
-  // initialize one wire midi
-  onewiremidi =
-      Onewiremidi_new(pio1, 0, CLOCK_PIN, midi_note_on, midi_note_off,
-                      nullptr, nullptr, nullptr, nullptr);
-  irq_set_exclusive_handler(PIO1_IRQ_0, midi_pio_irq_handler);
-  irq_set_priority(PIO1_IRQ_0, 0x00);
-  irq_set_enabled(PIO1_IRQ_0, true);
-  gpio_set_irq_enabled_with_callback(CLOCK_PIN, GPIO_IRQ_EDGE_FALL, false,
+  // initialize clock and reset capture
+  gpio_set_irq_enabled_with_callback(CLOCK_PIN, GPIO_IRQ_EDGE_FALL, true,
                                      clock_gpio_irq_handler);
+  gpio_set_irq_enabled(RESET_PIN, GPIO_IRQ_EDGE_FALL, true);
   irq_set_priority(IO_IRQ_BANK0, 0x00);
   irq_set_enabled(IO_IRQ_BANK0, true);
-  configure_clock_capture(false);
+  configure_clock_capture();
 
 // LED
 #if WS2812_ENABLED == 1
@@ -1543,11 +1472,6 @@ int main(void) {
     __wfi();  // Wait for Interrupt
     clock_ms++;
 
-    MidiByteEvent midi_byte{};
-    while (midi_byte_queue.pop(midi_byte)) {
-      Onewiremidi_receive_byte(onewiremidi, midi_byte.byte,
-                               midi_byte.timestamp_us);
-    }
 #if WS2812_ENABLED == 1
     if (clock_ms % 200 == 0) {
       const uint8_t knob_a_led =
@@ -1555,7 +1479,6 @@ int main(void) {
       const uint8_t knob_b_led =
           input_knob[2].Value() * 120 / input_knob[2].ValueMax();
       if (debounce_led_save > 0) debounce_led_save--;
-      if (debounce_lock_clock > 0) debounce_lock_clock--;
       if (sequencer.IsPlaying() && debounce_led_sequencer > 0) {
         debounce_led_sequencer--;
       }
@@ -1572,15 +1495,6 @@ int main(void) {
     while (piko_runtime_pop_request(&request)) {
       bool ok = true;
       switch (request.type) {
-        case PikoRequestType::SetClockMode:
-          if (request.value > 1) {
-            ok = false;
-          } else {
-            configure_clock_capture(request.value == CLOCK_INPUT_MIDI);
-            save_data[SAVE_CLOCK_INPUT_MODE] = request.value;
-            save_settings();
-          }
-          break;
         case PikoRequestType::SetPulsePpqn:
           if (!piko::ClockSync::validPulsePpqn(request.value)) {
             ok = false;
@@ -1588,7 +1502,21 @@ int main(void) {
             pulse_ppqn = request.value;
             save_data[SAVE_PULSE_PPQN] = pulse_ppqn;
             const uint32_t interrupts = save_and_disable_interrupts();
-            clock_sync.setPulsePpqn(pulse_ppqn, time_us_32());
+            clock_sync.setPulsePpqn(pulse_ppqn);
+            restore_interrupts(interrupts);
+            save_settings();
+          }
+          break;
+        case PikoRequestType::SetRestartOnStart:
+          if (request.value > 1) {
+            ok = false;
+          } else {
+            restart_on_start = request.value == 1;
+            save_data[SAVE_RESTART_ON_START] = restart_on_start
+                                                   ? RESTART_ON_START_ENABLED
+                                                   : RESTART_ON_START_DISABLED;
+            const uint32_t interrupts = save_and_disable_interrupts();
+            clock_sync.setRestartOnStart(restart_on_start);
             restore_interrupts(interrupts);
             save_settings();
           }
@@ -1607,9 +1535,9 @@ int main(void) {
       const uint32_t interrupts = save_and_disable_interrupts();
       const piko::ClockDiagnostics clock_diagnostics = clock_sync.diagnostics();
       restore_interrupts(interrupts);
-      piko_publish_clock_snapshot({
-          clock_diagnostics, clock_event_queue.drops(),
-          midi_byte_queue.drops() + piko_usb_midi_queue_drops()});
+      piko_publish_clock_snapshot({clock_diagnostics, clock_rejected_edges,
+                                   clock_event_queue.drops(),
+                                   piko_usb_midi_queue_drops()});
     }
     // flash works
     if (debounce_saving > 0 && clock_ms > 64000) {
@@ -1662,8 +1590,6 @@ int main(void) {
           sample_change = 0;
           sample = 0;
         }
-        param_set_bpm((uint16_t)(save_data[SAVE_BPM] << 8) +
-                      save_data[SAVE_BPM + 1]);
         noise_gate_thresh =
             (uint16_t)(save_data[SAVE_GATE] << 8) + save_data[SAVE_GATE + 1];
         probability_direction = save_data[SAVE_PROB_DIRECTION];
@@ -1671,21 +1597,21 @@ int main(void) {
         probability_retrig = save_data[SAVE_PROB_RETRIG];
         probability_gate = save_data[SAVE_PROB_GATE];
         probability_tunnel = save_data[SAVE_PROB_TUNNEL];
-        clock_input_ittybittymidi =
-            save_data[SAVE_CLOCK_INPUT_MODE] == CLOCK_INPUT_MIDI;
-        save_data[SAVE_CLOCK_INPUT_MODE] =
-            clock_input_ittybittymidi ? CLOCK_INPUT_MIDI : CLOCK_INPUT_CLOCK;
         pulse_ppqn = piko::ClockSync::validPulsePpqn(
                          save_data[SAVE_PULSE_PPQN])
                          ? save_data[SAVE_PULSE_PPQN]
-                         : 2;
+                         : 24;
         save_data[SAVE_PULSE_PPQN] = pulse_ppqn;
-        configure_clock_capture(clock_input_ittybittymidi);
+        restart_on_start =
+            save_data[SAVE_RESTART_ON_START] != RESTART_ON_START_DISABLED;
+        save_data[SAVE_RESTART_ON_START] = restart_on_start
+                                               ? RESTART_ON_START_ENABLED
+                                               : RESTART_ON_START_DISABLED;
+        configure_clock_capture();
         sequencer.Load(save_data);
 #ifdef DEBUG_SAVE
         printf("volume_reduce: %d\n", volume_reduce);
         printf("distortion: %d\n", distortion);
-        printf("bpm_set: %d\n", bpm_set);
         printf("filter_fc: %d\n", filter_fc);
         printf("sample_change: %d\n", sample_change);
         printf("noise_gate_thresh: %d\n", noise_gate_thresh);
@@ -1700,22 +1626,10 @@ int main(void) {
     if (clock_ms % 16 == 0) {  // 250 Hz
       // read gpio inputs
       for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
-        if (midi_button1 != i && midi_button2 != i) {
-          input_button[i].Read();
-        }
+        input_button[i].Read();
         // if (input_button[i].ChangedHigh(false)) {
         //   MidiOut_on(midiout, midi_notes[(i % 8)], 127);
         // }
-        if (input_button[1].ChangedHigh(true) ||
-            input_button[2].ChangedHigh(true) ||
-            input_button[5].ChangedHigh(true) ||
-            input_button[6].ChangedHigh(true)) {
-          if (input_button[1].On() && input_button[2].On() &&
-              input_button[5].On() && input_button[6].On()) {
-            debounce_lock_clock = 80;
-            do_lock_clock = !do_lock_clock;
-          }
-        }
         if (input_button[0].ChangedHigh(true) ||
             input_button[1].ChangedHigh(true) ||
             input_button[6].ChangedHigh(true) ||
@@ -1962,25 +1876,7 @@ int main(void) {
 
                   break;
                 case 7:
-                  // tempo
-                  {
-                    uint16_t bpm_set_new =
-                        round((double)input_knob[i].Value() * 255.0 / 4095 / 5) *
-                            5 +
-                        50;
-                    ledarray_binary_debounce = 48000;
-                    ledarray_binary = bpm_set_new - 50;
-                    if (bpm_set_new > 360) bpm_set_new = 360;
-                    if (bpm_set_new != internal_bpm_set) {
-#ifdef DEBUG_KNOB
-                      printf("%d: %d; \n", i, input_knob[i].Value());
-#endif
-                      save_data[SAVE_BPM] = (uint8_t)(bpm_set_new >> 8);
-                      save_data[SAVE_BPM + 1] = (uint8_t)bpm_set_new;
-
-                      param_set_bpm(bpm_set_new);
-                    }
-                  }
+                  // free slot (was internal tempo)
                   break;
 
                 default:
@@ -1993,13 +1889,7 @@ int main(void) {
       // adc reading end
     }
 
-    // trig out
-    output_trigger.Update();
-
-    if (ledarray_binary_debounce > 0) {
-      ledarray_binary_debounce--;
-      ledarray.SetBinary(ledarray_binary);
-    } else if (sequencer.IsRecording()) {
+    if (sequencer.IsRecording()) {
       ledarray.Clear();
       if (sequencer.Last() < 255) {
         ledarray.Set(sequencer.Last() % NUM_BUTTONS, 10000);

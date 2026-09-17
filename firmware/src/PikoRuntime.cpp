@@ -36,12 +36,12 @@ bool submitRequest(PikoRequestType type, uint8_t value) {
 
 }  // namespace
 
-bool piko_request_clock_mode(bool midi) {
-  return submitRequest(PikoRequestType::SetClockMode, midi ? 1 : 0);
-}
-
 bool piko_request_pulse_ppqn(uint8_t ppqn) {
   return submitRequest(PikoRequestType::SetPulsePpqn, ppqn);
+}
+
+bool piko_request_restart_on_start(bool enabled) {
+  return submitRequest(PikoRequestType::SetRestartOnStart, enabled ? 1 : 0);
 }
 
 bool piko_request_stop_playback() {
