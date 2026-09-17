@@ -32,8 +32,13 @@ set(PIKOCODE_SOURCES
 	${CMAKE_CURRENT_LIST_DIR}/doth/usb_descriptors.c
 )
 
+# 248 MHz overclock: slow the boot2 flash SPI clock so XIP reads stay reliable.
+pico_define_boot_stage2(slower_boot2 ${PICO_DEFAULT_BOOT_STAGE2_FILE})
+target_compile_definitions(slower_boot2 PRIVATE PICO_FLASH_SPI_CLKDIV=4)
+
 function(add_pikocore_firmware TARGET_NAME OUTPUT_BASENAME FLASH_SIZE_BYTES)
 	add_executable(${TARGET_NAME} ${PIKOCODE_SOURCES})
+	pico_set_boot_stage2(${TARGET_NAME} slower_boot2)
 	set_target_properties(${TARGET_NAME} PROPERTIES OUTPUT_NAME "${OUTPUT_BASENAME}")
 	pico_generate_pio_header(${TARGET_NAME} ${CMAKE_CURRENT_LIST_DIR}/doth/WS2812.pio)
 	pico_generate_pio_header(${TARGET_NAME} ${CMAKE_CURRENT_LIST_DIR}/doth/onewiremidi.pio)
