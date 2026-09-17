@@ -11,5 +11,12 @@ add_executable(clock_sync_test
 target_include_directories(clock_sync_test PRIVATE ../src)
 target_compile_options(clock_sync_test PRIVATE -Wall -Wextra -Werror)
 
+add_executable(dsp_test
+  dsp_test.cpp
+)
+target_include_directories(dsp_test PRIVATE ../src ..)
+target_compile_options(dsp_test PRIVATE -Wall -Wextra -Werror)
+
 enable_testing()
 add_test(NAME clock_sync_test COMMAND clock_sync_test)
+add_test(NAME dsp_test COMMAND dsp_test)

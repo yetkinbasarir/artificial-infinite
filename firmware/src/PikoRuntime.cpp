@@ -1,6 +1,8 @@
 #include "PikoRuntime.h"
 
 #include "SpscQueue.h"
+#include "pico/multicore.h"
+#include "pico/mutex.h"
 #include "pico/stdlib.h"
 #include "tusb.h"
 
@@ -10,6 +12,9 @@ struct UsbMidiEvent {
   uint8_t note;
   uint8_t velocity;
 };
+
+auto_init_mutex(flash_mutex);
+volatile bool lockout_victim_ready = false;
 
 SpscQueue<PikoRequest, 8> request_queue;
 SpscQueue<UsbMidiEvent, 32> usb_midi_queue;
@@ -35,6 +40,28 @@ bool submitRequest(PikoRequestType type, uint8_t value) {
 }
 
 }  // namespace
+
+void piko_flash_lockout_victim_init() {
+  multicore_lockout_victim_init();
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  lockout_victim_ready = true;
+}
+
+void piko_flash_lock() {
+  // Waiting here keeps interrupts enabled, so a core parked on the mutex can
+  // still answer the other core's lockout request.
+  mutex_enter_blocking(&flash_mutex);
+  if (get_core_num() == 0 && lockout_victim_ready) {
+    multicore_lockout_start_blocking();
+  }
+}
+
+void piko_flash_unlock() {
+  if (get_core_num() == 0 && lockout_victim_ready) {
+    multicore_lockout_end_blocking();
+  }
+  mutex_exit(&flash_mutex);
+}
 
 bool piko_request_pulse_ppqn(uint8_t ppqn) {
   return submitRequest(PikoRequestType::SetPulsePpqn, ppqn);

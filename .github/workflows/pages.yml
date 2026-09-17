@@ -38,7 +38,7 @@ jobs:
 
       # Generated headers are committed; keep make from regenerating them after checkout.
       - name: Mark generated headers up to date
-        run: touch firmware/doth/easing.h firmware/doth/filter.h
+        run: touch firmware/doth/easing.h firmware/doth/djfilter_tables.h
 
       - name: Build firmware and copy UF2 to web/public
         working-directory: firmware

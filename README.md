@@ -66,6 +66,31 @@ Korg SQ-1 and Volca series, and Arturia BeatStep Pro or Moog DFAM clock
 outputs work at whichever division they are set to. MIDI clock is not
 supported: the clock input is analog only.
 
+## Controls
+
+The first knob picks a selector position; knob A and knob B then do what the
+row says.
+
+| Selector | Knob A                          | Knob B                      |
+| -------- | ------------------------------- | --------------------------- |
+| 1        | Sample select                   | Break amount (probabilities)|
+| 2        | **DJ filter**: low-pass / bypass / high-pass | Timestretch    |
+| 3        | Noise gate threshold            | Gate probability            |
+| 4        | Jump probability                | Retrigger probability       |
+| 5        | Tunnel probability              | Reverse probability         |
+| 6        | Sequencer record                | Sequencer play              |
+| 7        | Save settings                   | Load settings               |
+| 8        | **Volume**                      | — (free)                    |
+
+**DJ filter (selector 2, knob A).** One pot sweeps a 4th-order Linkwitz-Riley
+isolator. The middle of the pot (±5 %) is a hard bypass: audio passes through
+bit for bit. Turning left sweeps a low-pass from 10 kHz down to 60 Hz; turning
+right sweeps a high-pass from 30 Hz up to 6 kHz. There is no resonance, and
+the cutoff is smoothed so a fast turn does not zipper.
+
+**Volume (selector 8, knob A).** A linear gain: silent at the bottom of the
+pot, unity at the top. There is no distortion stage.
+
 ## Repository layout
 
 - `firmware/`: Pico firmware (C/C++, pico-sdk 2.1.1)

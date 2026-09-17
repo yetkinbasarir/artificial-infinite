@@ -18,14 +18,15 @@
 
 #include "PikoAudioBank.h"
 #include "ClockSync.h"
+#include "PikoProbabilities.h"
 #include "PikoRuntime.h"
 #include "PikoSampleManager.h"
 #include "SpscQueue.h"
 // pikocore files
 #include "doth/button.h"
 #include "doth/delay.h"
+#include "doth/djfilter.h"
 #include "doth/easing.h"
-#include "doth/filter.h"
 #include "doth/knob.h"
 #include "doth/led.h"
 #include "doth/ledarray.h"
@@ -43,8 +44,7 @@
 #define NUM_BUTTONS 8
 #define NUM_KNOBS 3
 #define NUM_LEDS 8
-#define DISTORTION_MAX 30
-#define VOLUME_REDUCE_MAX 30
+#define VOLUME_GAIN_UNITY 256
 #define HEAD_SHIFT 10  // crossfade time in samples (2^HEAD_SHIFT)
 #define AUDIO_PIN 20   // audio out
 #ifdef PICO_DEFAULT_LED_PIN
@@ -64,15 +64,11 @@
 // flash
 // https://github.com/raspberrypi/pico-examples/blob/master/flash/program/flash_program.c
 // https://kevinboone.me/picoflash.html
-#define SAVE_VOLUME 0  // needs two bytes
+#define SAVE_VOLUME 0  // needs two bytes: linear gain, 0..256
 #define SAVE_FILTER 4  // needs one byte
 #define SAVE_SAMPLE 5  // needs one byte
 #define SAVE_GATE 6    // needs two bytes
-#define SAVE_PROB_DIRECTION 8
-#define SAVE_PROB_RETRIG 9
-#define SAVE_PROB_JUMP 10
-#define SAVE_PROB_GATE 11
-#define SAVE_PROB_TUNNEL 12
+// Probability slots 8..12 are defined in PikoProbabilities.h.
 #define SAVE_PULSE_PPQN 14
 // Stored as 1 = restart on start, 2 = keep position. 0 means "never written"
 // and loads as the default, so settings pages from older firmware behave.
@@ -134,7 +130,6 @@ uint16_t select_beat = 0;
 uint16_t select_beat_freeze = 0;
 bool direction[] = {1, 1};  // 0 = reverse, 1 = forward
 bool base_direction = 1;    // 0 = reverse, 1 == forward
-uint8_t volume_mod = 0;
 
 struct TimestretchGrain {
   uint64_t start_phase_q32;
@@ -142,12 +137,9 @@ struct TimestretchGrain {
   uint16_t age;
 };
 
-// volume/distortion/filter/bitcrush/stretch
-uint8_t distortion = 0;
-uint8_t volume_reduce = 0;
-uint8_t filter_fc = LPF_MAX + 10;
-uint8_t hpf_fc = 0;
-uint8_t filter_q = 0;
+// volume/filter/bitcrush/stretch
+uint16_t volume_gain = VOLUME_GAIN_UNITY;  // 0 = silent, 256 = unity
+DjFilter dj_filter;
 uint8_t bitcrush = 0;
 uint32_t stretch_q8 = kStretchQ8One;
 uint32_t timestretch_applied_q8 = kStretchQ8One;
@@ -182,13 +174,10 @@ uint8_t retrig_sel = 4;
 uint8_t retrig_count = 0;
 uint8_t retrig_max = 2;
 uint8_t retrig_filter = 0;
-uint8_t retrig_filter_change = 0;
 int8_t retrig_pitch_change = 0;
 uint8_t retrig_volume_reduce = 0;
 uint8_t button_on = NUM_BUTTONS;
 uint8_t button_on2 = 3;
-uint8_t button_filter = 0;
-bool button_filter_on = false;
 uint8_t retrig_volume_reduce_change = 0;
 bool retrig_pitch_up = false;
 bool retrig_pitch_down = false;
@@ -237,37 +226,29 @@ inline void set_audio_pwm_level(uint8_t level) {
  *
  */
 
-void param_set_break(uint16_t knob_val, uint8_t &filter_fc_,
-                     uint8_t &distortion_, uint8_t &probability_jump_,
+void param_set_break(uint16_t knob_val, uint8_t &probability_jump_,
                      uint8_t &probability_retrig_, uint8_t &probability_gate_,
                      uint8_t &probability_direction_,
                      uint8_t &probability_tunnel_,
                      uint8_t save_data_[FLASH_PAGE_SIZE]) {
   if (knob_val < 50) {
     // turn it all off
-    distortion_ = 0;
     probability_jump_ = 0;
     probability_retrig_ = 0;
     probability_gate_ = 0;
     probability_direction_ = 0;
     probability_tunnel_ = 0;
   } else {
-    distortion_ = ease_distortion(knob_val) * DISTORTION_MAX / 255;
     probability_jump_ = ease_probability_jump(knob_val);
     probability_retrig_ = ease_probability_retrig(knob_val);
     probability_gate_ = ease_probability_gate(knob_val);
     probability_direction_ = ease_probability_direction(knob_val);
     probability_tunnel_ = ease_probability_tunnel(knob_val);
   }
-  save_data_[SAVE_PROB_JUMP] = probability_jump_;
-  save_data_[SAVE_PROB_DIRECTION] = probability_direction_;
-  save_data_[SAVE_PROB_RETRIG] = probability_jump_;
-  save_data_[SAVE_PROB_GATE] = probability_direction_;
-  save_data_[SAVE_PROB_TUNNEL] = probability_tunnel_;
-  save_data_[SAVE_VOLUME] =
-      (uint8_t)((distortion_ * 1095 / DISTORTION_MAX + 3000) >> 8);
-  save_data_[SAVE_VOLUME + 1] =
-      (uint8_t)(distortion_ * 1095 / DISTORTION_MAX + 3000);
+  const PikoProbabilities probabilities{probability_direction_,
+                                        probability_jump_, probability_retrig_,
+                                        probability_gate_, probability_tunnel_};
+  piko_store_probabilities(probabilities, save_data_);
 }
 
 void update_playback_rate() {
@@ -297,18 +278,32 @@ void update_playback_rate() {
   }
 }
 
-void param_set_volume(uint16_t knobval, uint8_t &distortion_,
-                      uint8_t &volume_reduce_) {
-  if (knobval < 2000) {
-    distortion_ = 0;
-    volume_reduce_ = (2000 - knobval) * (VOLUME_REDUCE_MAX + 3) / 2000;
-  } else if (knobval > 3000) {
-    volume_reduce_ = 0;
-    distortion = (knobval - 3000) * DISTORTION_MAX / (4095 - 3000);
-  } else {
-    volume_reduce_ = 0;
-    distortion = 0;
+// Linear gain: silent at the bottom of the pot, unity at the top.
+uint16_t volume_gain_from_knob(uint16_t knobval) {
+  if (knobval >= kKnobMax) return VOLUME_GAIN_UNITY;
+  return (uint16_t)((uint32_t)knobval * VOLUME_GAIN_UNITY / kKnobMax);
+}
+
+void param_set_volume(uint16_t knobval, uint16_t &volume_gain_) {
+  volume_gain_ = volume_gain_from_knob(knobval);
+}
+
+uint8_t apply_volume_gain(uint8_t sample) {
+  if (volume_gain >= VOLUME_GAIN_UNITY) return sample;
+  const int32_t centred = (int32_t)sample - 128;
+  return (uint8_t)(((centred * (int32_t)volume_gain) >> 8) + 128);
+}
+
+// Position the DJ filter runs at: the smoothed pot, pushed further into the
+// low-pass half while a retrigger sweep is active.
+int32_t dj_filter_effective_position() {
+  int32_t position = dj_filter.position;
+  if (retrig_filter > 0 && retrig_max > 0) {
+    const int32_t swept = -(int32_t)((uint32_t)retrig_filter *
+                                     PIKO_DJ_POSITION_ONE / retrig_max);
+    if (swept < position) position = swept;
   }
+  return position;
 }
 
 // randint returns value
@@ -523,7 +518,6 @@ void reset_retrig_fx() {
   retrig_pitch_change = 0;
   retrig_volume_reduce = 0;
   retrig_volume_reduce_change = 0;
-  button_filter_on = false;
   fx_retrig = false;
   btn_retrig = false;
   update_playback_rate();
@@ -756,7 +750,6 @@ void pwm_interrupt_handler() {
         button_on = NUM_BUTTONS;
         button_on2 = NUM_BUTTONS;
         select_beat_freeze = 0;
-        button_filter_on = false;
         // hm
         retrig_volume_reduce = 0;
         retrig_volume_reduce_change = 0;  // reset
@@ -786,7 +779,6 @@ void pwm_interrupt_handler() {
     if (button_on2 < NUM_BUTTONS) {
       if (!input_button[button_on2].On()) {
         button_on2 = NUM_BUTTONS;
-        button_filter_on = false;
       }
     }
     if (!timestretch_active) {
@@ -884,7 +876,6 @@ void pwm_interrupt_handler() {
         }
         if (r3 < 30) {
           retrig_filter = retrig_max;
-          retrig_filter_change = (LPF_MAX - 10) / retrig_max;
         }
         if (r4 < 20 && retrig_sel > 6) {
           retrig_volume_reduce = retrig_max;
@@ -1184,72 +1175,36 @@ void pwm_interrupt_handler() {
   // The slice has run its length and the next beat has not arrived yet.
   if (slice_frames_remaining == 0) audio_now = 128;
 
-    // <volume>
-    if (volume_reduce >= VOLUME_REDUCE_MAX) audio_now = 128;
-    if (audio_now != 128) {
-      // distortion / wave-folding
-      if (distortion > 0) {
-        if (audio_now > 128) {
-          if (audio_now < (255 - distortion)) {
-            audio_now += distortion;
-          } else {
-            audio_now = 255 - distortion;
-          }
-          audio_now = 128 + ((audio_now - 128) / ((distortion >> 4) + 1));
-        } else {
-          if (audio_now > distortion) {
-            audio_now -= distortion;
-          } else {
-            audio_now = distortion - audio_now;
-          }
-          audio_now = 128 - ((128 - audio_now) / ((distortion >> 4) + 1));
-        }
-      }
-      // reduce volume
-      if (volume_reduce > 0) {
-        if (audio_now > 128) {
-          audio_now = audio_now - (volume_reduce);
-          if (audio_now < 128) audio_now = 128;
-        } else {
-          audio_now = audio_now + (volume_reduce);
-          if (audio_now > 128) audio_now = 128;
-        }
-      }
-      if ((volume_mod + retrig_volume_reduce + noise_gate_fade) > 0 &&
-          audio_now != 128) {
-        if (audio_now > 128) {
-          audio_now = ((audio_now - 128) >>
-                       (volume_mod + retrig_volume_reduce + noise_gate_fade)) +
-                      128;
-        } else {
-          audio_now =
-              128 - ((128 - audio_now) >>
-                     (volume_mod + retrig_volume_reduce + noise_gate_fade));
-        }
-      }
-    }  // </volume>
-
-    // <bitcrush>
-    // if (bitcrush > 0) {
-    //   if (audio_now > 128) {
-    //     audio_now = 128 + (((audio_now - 128) >> bitcrush) << bitcrush);
-    //   } else if (audio_now < 128) {
-    //     audio_now = 128 - (((128 - audio_now) >> bitcrush) << bitcrush);
-    //   }
-    // }
-    // </bitcrush>
-
-    // <filter>
-    if ((filter_fc - (retrig_filter * retrig_filter_change) - button_filter) <=
-        LPF_MAX) {
-      audio_now = (uint8_t)filter_lpf(
-          (int64_t)audio_now,
-          (filter_fc - (retrig_filter * retrig_filter_change) - button_filter),
-          filter_q);
-      // } else {
-      // audio_now = (uint8_t)filter_lpf((int64_t)audio_now, LPF_MAX, filter_q);
+  // <envelope> noise gate and the retrigger volume shape
+  const uint8_t envelope_shift = retrig_volume_reduce + noise_gate_fade;
+  if (envelope_shift > 0 && audio_now != 128) {
+    if (audio_now > 128) {
+      audio_now = ((audio_now - 128) >> envelope_shift) + 128;
+    } else {
+      audio_now = 128 - ((128 - audio_now) >> envelope_shift);
     }
-    // </filter>
+  }
+  // </envelope>
+
+  // <bitcrush>
+  // if (bitcrush > 0) {
+  //   if (audio_now > 128) {
+  //     audio_now = 128 + (((audio_now - 128) >> bitcrush) << bitcrush);
+  //   } else if (audio_now < 128) {
+  //     audio_now = 128 - (((128 - audio_now) >> bitcrush) << bitcrush);
+  //   }
+  // }
+  // </bitcrush>
+
+  // <dj filter> low-pass / bypass / high-pass on one pot
+  dj_filter_advance(&dj_filter);
+  audio_now =
+      dj_filter_process(&dj_filter, audio_now, dj_filter_effective_position());
+  // </dj filter>
+
+  // <volume> linear output gain
+  audio_now = apply_volume_gain(audio_now);
+  // </volume>
 
     // <delay>
     // audio_now = delay.Update(audio_now);
@@ -1285,7 +1240,6 @@ void do_start_everything() {
   retrig_pitch_change = 0;
   retrig_volume_reduce = 0;
   retrig_volume_reduce_change = 0;
-  button_filter_on = false;
   fx_retrig = false;
   btn_retrig = false;
   do_mute = false;
@@ -1389,14 +1343,17 @@ int main(void) {
   // initialize sequencer
   sequencer.Init();
 
+  // initialize the DJ filter in bypass until the pot is moved
+  dj_filter_init(&dj_filter);
+
   // initialize save data
   uint8_t save_data[FLASH_PAGE_SIZE];
   for (uint32_t i = 0; i < FLASH_PAGE_SIZE; ++i) {
     save_data[i] = 0;
   }
   // // save defaults that aren't defaulted to 0
-  save_data[SAVE_VOLUME] = (uint8_t)(2500 >> 8);
-  save_data[SAVE_VOLUME + 1] = (uint8_t)2500;
+  save_data[SAVE_VOLUME] = (uint8_t)(VOLUME_GAIN_UNITY >> 8);
+  save_data[SAVE_VOLUME + 1] = (uint8_t)VOLUME_GAIN_UNITY;
   noise_gate_thresh = gate_default_thresh();
   noise_gate_thresh_use = noise_gate_thresh;
   save_data[SAVE_GATE] = (uint8_t)(noise_gate_thresh >> 8);
@@ -1434,10 +1391,13 @@ int main(void) {
 #ifdef DEBUG_SAVE
     print_buf(save_data, FLASH_PAGE_SIZE);
 #endif
+    // Keep core 1 off the flash (and off XIP) for the whole erase/program.
+    piko_flash_lock();
     uint32_t ints = save_and_disable_interrupts();
     flash_range_erase(PIKO_SETTINGS_FLASH_OFFSET, FLASH_SECTOR_SIZE);
     flash_range_program(PIKO_SETTINGS_FLASH_OFFSET, save_data, FLASH_PAGE_SIZE);
     restore_interrupts(ints);
+    piko_flash_unlock();
   };
 
   // initialize clock and reset capture
@@ -1574,13 +1534,15 @@ int main(void) {
           flash_target_contents[FLASH_PAGE_SIZE - 2] == 0x02 &&
           flash_target_contents[FLASH_PAGE_SIZE - 3] == 0x03 &&
           flash_target_contents[FLASH_PAGE_SIZE - 4] == 0x04) {
+        // Reading XIP while core 1 programs the bank would return garbage.
+        piko_flash_lock();
         for (uint i = 0; i < FLASH_PAGE_SIZE; i++) {
           save_data[i] = flash_target_contents[i];
         }
-        param_set_volume((uint16_t)(save_data[SAVE_VOLUME] << 8) +
-                             save_data[SAVE_VOLUME + 1],
-                         distortion, volume_reduce);
-        // filter_fc = flash_target_contents[SAVE_FILTER];
+        piko_flash_unlock();
+        volume_gain = (uint16_t)(save_data[SAVE_VOLUME] << 8) +
+                      save_data[SAVE_VOLUME + 1];
+        if (volume_gain > VOLUME_GAIN_UNITY) volume_gain = VOLUME_GAIN_UNITY;
         sample_change = save_data[SAVE_SAMPLE];
         if (piko_audio_sample_count() > 0) {
           sample_change %= piko_audio_sample_count();
@@ -1592,11 +1554,13 @@ int main(void) {
         }
         noise_gate_thresh =
             (uint16_t)(save_data[SAVE_GATE] << 8) + save_data[SAVE_GATE + 1];
-        probability_direction = save_data[SAVE_PROB_DIRECTION];
-        probability_jump = save_data[SAVE_PROB_JUMP];
-        probability_retrig = save_data[SAVE_PROB_RETRIG];
-        probability_gate = save_data[SAVE_PROB_GATE];
-        probability_tunnel = save_data[SAVE_PROB_TUNNEL];
+        const PikoProbabilities probabilities =
+            piko_load_probabilities(save_data);
+        probability_direction = probabilities.direction;
+        probability_jump = probabilities.jump;
+        probability_retrig = probabilities.retrig;
+        probability_gate = probabilities.gate;
+        probability_tunnel = probabilities.tunnel;
         pulse_ppqn = piko::ClockSync::validPulsePpqn(
                          save_data[SAVE_PULSE_PPQN])
                          ? save_data[SAVE_PULSE_PPQN]
@@ -1610,9 +1574,7 @@ int main(void) {
         configure_clock_capture();
         sequencer.Load(save_data);
 #ifdef DEBUG_SAVE
-        printf("volume_reduce: %d\n", volume_reduce);
-        printf("distortion: %d\n", distortion);
-        printf("filter_fc: %d\n", filter_fc);
+        printf("volume_gain: %d\n", volume_gain);
         printf("sample_change: %d\n", sample_change);
         printf("noise_gate_thresh: %d\n", noise_gate_thresh);
         printf("probability_direction: %d\n", probability_direction);
@@ -1637,10 +1599,9 @@ int main(void) {
           if (input_button[0].On() && input_button[1].On() &&
               input_button[6].On() && input_button[7].On()) {
             // reset fx
-            param_set_break(0, filter_fc, distortion, probability_jump,
-                            probability_retrig, probability_gate,
-                            probability_direction, probability_tunnel,
-                            save_data);
+            param_set_break(0, probability_jump, probability_retrig,
+                            probability_gate, probability_direction,
+                            probability_tunnel, save_data);
           }
         }
         if (input_button[0].ChangedHigh(true) ||
@@ -1734,8 +1695,8 @@ int main(void) {
                   }
                   break;
                 case 1:
-                  filter_fc = input_knob[i].Value() * (LPF_MAX + 10) /
-                              input_knob[i].ValueMax();
+                  // DJ filter: low-pass, bypass in the middle, high-pass
+                  dj_filter_set_knob(&dj_filter, input_knob[i].Value());
                   break;
                 case 2:
                   // gate
@@ -1757,7 +1718,7 @@ int main(void) {
                     probability_jump = (input_knob[i].Value() * 254 /
                                         input_knob[i].ValueMax());
                   }
-                  save_data[SAVE_PROB_JUMP] = probability_jump;
+                  save_data[PIKO_SAVE_PROB_JUMP] = probability_jump;
                   break;
                 case 4:
                   // tunnel probability
@@ -1767,7 +1728,7 @@ int main(void) {
                     probability_tunnel = (input_knob[i].Value() * 254 /
                                           input_knob[i].ValueMax());
                   }
-                  save_data[SAVE_PROB_TUNNEL] = probability_tunnel;
+                  save_data[PIKO_SAVE_PROB_TUNNEL] = probability_tunnel;
                   break;
                 case 5:
                   // sequencer rec
@@ -1794,11 +1755,9 @@ int main(void) {
                   break;
                 case 7:
                   // volume
-                  save_data[SAVE_VOLUME] =
-                      (uint8_t)(input_knob[i].Value() >> 8);
-                  save_data[SAVE_VOLUME + 1] = (uint8_t)input_knob[i].Value();
-                  param_set_volume(input_knob[i].Value(), distortion,
-                                   volume_reduce);
+                  param_set_volume(input_knob[i].Value(), volume_gain);
+                  save_data[SAVE_VOLUME] = (uint8_t)(volume_gain >> 8);
+                  save_data[SAVE_VOLUME + 1] = (uint8_t)volume_gain;
 #ifdef DEBUG_KNOB
                   printf("%d: %d; \n", i, input_knob[i].Value());
 #endif
@@ -1816,10 +1775,10 @@ int main(void) {
 
               switch (selector_knob) {
                 case 0:
-                  param_set_break(input_knob[i].Value(), filter_fc, distortion,
-                                  probability_jump, probability_retrig,
-                                  probability_gate, probability_direction,
-                                  probability_tunnel, save_data);
+                  param_set_break(input_knob[i].Value(), probability_jump,
+                                  probability_retrig, probability_gate,
+                                  probability_direction, probability_tunnel,
+                                  save_data);
                   break;
                 case 1:
                   // stretch
@@ -1833,7 +1792,7 @@ int main(void) {
                     probability_gate = (input_knob[i].Value() * 254 /
                                         input_knob[i].ValueMax());
                   }
-                  save_data[SAVE_PROB_GATE] = probability_direction;
+                  save_data[PIKO_SAVE_PROB_GATE] = probability_gate;
                   break;
                 case 3:
                   // retrig probability
@@ -1843,7 +1802,7 @@ int main(void) {
                     probability_retrig = (input_knob[i].Value() * 254 /
                                           input_knob[i].ValueMax());
                   }
-                  save_data[SAVE_PROB_RETRIG] = probability_jump;
+                  save_data[PIKO_SAVE_PROB_RETRIG] = probability_retrig;
                   break;
                 case 4:
                   // reverse probability
@@ -1853,7 +1812,7 @@ int main(void) {
                     probability_direction = (input_knob[i].Value() * 254 /
                                              input_knob[i].ValueMax());
                   }
-                  save_data[SAVE_PROB_DIRECTION] = probability_direction;
+                  save_data[PIKO_SAVE_PROB_DIRECTION] = probability_direction;
                   break;
                 case 5:
                   // sequencer on

@@ -43,7 +43,9 @@ class Sequencer {
   }
 
   void Record(uint8_t v) {
-    if (isRecording) {
+    // The pattern is capped at 128 steps; further steps are dropped rather
+    // than written past the end of mem.
+    if (isRecording && len < 128) {
       mem[len] = v;
       len++;
     }

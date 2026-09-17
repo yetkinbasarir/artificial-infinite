@@ -244,7 +244,9 @@ void handle_read() {
 
 void erase_bank_header() {
   piko_audio_bank_set_mutating(true);
+  piko_flash_lock();
   flash_range_erase(PIKO_AUDIO_FLASH_OFFSET, PIKO_BANK_HEADER_SIZE);
+  piko_flash_unlock();
   piko_audio_bank_rescan();
   piko_audio_bank_set_mutating(false);
 }
@@ -297,6 +299,7 @@ void handle_write() {
   }
 
   piko_audio_bank_set_mutating(true);
+  piko_flash_lock();
 
   flash_range_erase(PIKO_AUDIO_FLASH_OFFSET, PIKO_BANK_HEADER_SIZE);
 
@@ -309,6 +312,7 @@ void handle_write() {
     const uint32_t page_fill = remaining < kFlashPageSize ? remaining : kFlashPageSize;
     memset(page_buf, 0xff, sizeof(page_buf));
     if (!read_exact(page_buf, page_fill, kWriteTimeoutMs)) {
+      piko_flash_unlock();
       piko_audio_bank_rescan();
       piko_audio_bank_set_mutating(false);
       write_str("TIMEOUT\n");
@@ -331,6 +335,7 @@ void handle_write() {
     flash_range_program(PIKO_AUDIO_FLASH_OFFSET + offset, page_buf, sizeof(page_buf));
   }
 
+  piko_flash_unlock();
   piko_audio_bank_rescan();
   const bool bank_ok = piko_audio_bank_valid();
   piko_audio_bank_set_mutating(false);
@@ -413,6 +418,8 @@ void piko_sample_manager_set_ready() {
 }
 
 void piko_sample_manager_core() {
+  // Core 0 locks this core out around its own flash writes.
+  piko_flash_lockout_victim_init();
   tusb_init();
   while (true) {
     service_usb();

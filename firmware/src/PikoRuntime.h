@@ -24,6 +24,14 @@ struct PikoClockSnapshot {
   uint32_t midi_queue_drops;  // USB MIDI note output only
 };
 
+// Flash is a single shared device: core 0 saves settings while core 1 writes
+// the sample bank, so both sides take this lock before touching it. Core 0
+// additionally locks core 1 out, which keeps core 1 from reading XIP while a
+// sector is erased or programmed.
+void piko_flash_lock();
+void piko_flash_unlock();
+void piko_flash_lockout_victim_init();
+
 // Core 1 request API. Completion is explicitly acknowledged by core 0.
 bool piko_request_pulse_ppqn(uint8_t ppqn);
 bool piko_request_restart_on_start(bool enabled);

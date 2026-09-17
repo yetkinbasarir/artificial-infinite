@@ -11,7 +11,7 @@ FIRMWARE_UF2 := build/artificial-infinite-2mb.uf2
 WEB_PUBLIC_DIR := ../web/public
 WEB_UF2 := $(WEB_PUBLIC_DIR)/artificial-infinite-2mb.uf2
 
-.PHONY: build buildit justbuild quick publish-web-uf2 webapp-build test clean prereqs easing.h filter.h
+.PHONY: build buildit justbuild quick publish-web-uf2 webapp-build test clean prereqs easing.h djfilter
 
 buildit: quick
 
@@ -31,13 +31,13 @@ doth/easing.h: doth/generate_easing.py doth/easings/*.txt
 
 easing.h: doth/easing.h
 
-doth/filter.h: doth/biquad.py
-	cd doth && python3 biquad.py > filter.h
-	clang-format -i --style=google doth/filter.h
+doth/djfilter_tables.h: doth/generate_djfilter.py
+	cd doth && python3 generate_djfilter.py > djfilter_tables.h
+	clang-format -i --style=google doth/djfilter_tables.h
 
-filter.h: doth/filter.h
+djfilter: doth/djfilter_tables.h
 
-quick: doth/easing.h doth/filter.h
+quick: doth/easing.h doth/djfilter_tables.h
 	@test -n "$(PICO_SDK_PATH)" || (echo "PICO_SDK_PATH not found. Set PICO_SDK_PATH or run 'make pico-sdk'."; exit 1)
 	mkdir -p build
 	cd build && cmake -DPICO_SDK_PATH="$(PICO_SDK_PATH)" ..
