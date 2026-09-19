@@ -181,8 +181,11 @@ external flag.
 - Loader tempo analysis: `web/src/bpm.ts` analyses a dropped batch together
   (spectral flux onset envelope over a hand-written radix-2 FFT, autocorrelation
   with a log-normal tempo prior, octave settled by length matches within the
-  batch, then onset density, then the 80–180 range) and records where each BPM
-  came from, flagging the ones worth a listen. Rows preview with a click at
+  batch — which pick the sample's own candidate rather than copying the
+  sibling's tempo — then onset density, then the 80–180 range) and records
+  where each BPM came from. Agreement with the estimate allows the half, double
+  and three-against-two readings, and only the weaker rules or a disagreement
+  raise a flag. Leading numbers in file names (60–250) count as a stated BPM. Rows preview with a click at
   their own BPM, slots are ordered by centi-BPM then name, and
   `web/src/zip.ts` is a store-only ZIP writer for the named-copies download.
   No new dependencies.

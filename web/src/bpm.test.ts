@@ -7,7 +7,9 @@ import {
   countOnsets,
   octaveDistance,
   spectralFluxEnvelope,
+  tempoAgrees,
 } from './bpm';
+import { inferBpmFromName } from './audio';
 import { buildZip, crc32, namedCopyFilename } from './zip';
 
 const SAMPLE_RATE = 24000;
@@ -67,11 +69,43 @@ describe('candidate maths', () => {
     expect(octaveDistance(85, 170)).toBeCloseTo(0, 6);
     expect(octaveDistance(170, 114)).toBeCloseTo(octaveDistance(85, 114), 6);
     expect(approximateDeviation(170, 85)).toBeCloseTo(0, 6);
-    expect(approximateDeviation(176.8, 85)).toBeCloseTo(0.04, 2);
+  });
+
+  it('accepts half, double and three-against-two readings of the estimate', () => {
+    // The estimate is the half-time pulse.
+    expect(tempoAgrees(170, 85)).toBe(true);
+    // The estimate counts in threes against the chosen tempo: 180 against 120.
+    expect(tempoAgrees(180, 120)).toBe(true);
+    expect(tempoAgrees(120, 180)).toBe(true);
+    // Just inside and just outside the 4 % window.
+    expect(tempoAgrees(176.8, 90)).toBe(true);
+    expect(tempoAgrees(150, 90)).toBe(false);
   });
 });
 
 describe('batch analysis', () => {
+  it('reads a leading number as the tempo', () => {
+    expect(inferBpmFromName('180 Classic Amen.wav')).toBe(180);
+    expect(inferBpmFromName('162 Kid Break ALL.wav')).toBe(162);
+    expect(inferBpmFromName('124-house loop.wav')).toBe(124);
+    expect(inferBpmFromName('87.5_halftime.wav')).toBe(87.5);
+    // Out of the plausible range, or not a tempo at all.
+    expect(inferBpmFromName('808 kick.wav')).toBeNull();
+    expect(inferBpmFromName('4 on the floor.wav')).toBeNull();
+    expect(inferBpmFromName('1990s break.wav')).toBeNull();
+    expect(inferBpmFromName('180bpmless.wav')).toBe(180);
+  });
+
+  it('takes a named tempo without flagging the row', () => {
+    const [result] = analyzeSampleBpm([
+      { id: 'a', name: '162 Kid Break ALL.wav', mono: makeLoop(162, 12), sampleRate: SAMPLE_RATE },
+    ]);
+    expect(result.bpm).toBeCloseTo(162, 5);
+    expect(result.source).toBe('name');
+    expect(result.beats).toBe(12);
+    expect(result.flagged).toBe(false);
+  });
+
   it('takes the BPM from the file name', () => {
     const [result] = analyzeSampleBpm([
       { id: 'a', name: '164.50 bpm Cymbal Break.wav', mono: makeLoop(164.5, 8), sampleRate: SAMPLE_RATE },
@@ -91,9 +125,19 @@ describe('batch analysis', () => {
     ]);
     const glitch = results.find((r) => r.id === 'glitch');
     expect(glitch?.bpm).toBeCloseTo(180, 5);
-    // A decision made this way is flagged for review.
     expect(['length', 'analysis']).toContain(glitch?.source);
-    if (glitch?.source === 'length') expect(glitch.flagged).toBe(true);
+    // Evidence from a named sibling is good enough not to need a warning.
+    if (glitch?.source === 'length') expect(glitch.flagged).toBe(false);
+  });
+
+  it('keeps its own candidate when a length match settles the octave', () => {
+    // The reference names 164.50; this loop's own length says 165.
+    const results = analyzeSampleBpm(
+      [{ id: 'duby', name: 'Duby Jungle Break.wav', mono: makeLoop(165, 8), sampleRate: SAMPLE_RATE }],
+      [{ name: '164.50 bpm Cymbal Break', seconds: (8 * 60) / 164.5, bpm: 164.5 }],
+    );
+    expect(results[0].bpm).toBeCloseTo(165, 1);
+    expect(results[0].bpm).not.toBeCloseTo(164.5, 2);
   });
 
   it('settles the octave from a half-length sample that names its BPM', () => {
@@ -102,7 +146,7 @@ describe('batch analysis', () => {
       { id: 'long', name: 'Jungle2.wav', mono: makeLoop(170, 8), sampleRate: SAMPLE_RATE },
     ]);
     const long = results.find((r) => r.id === 'long');
-    expect(long?.bpm).toBeCloseTo(170, 5);
+    expect(long?.bpm).toBeCloseTo(170, 2);
     expect(long?.beats).toBe(8);
   });
 

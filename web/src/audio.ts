@@ -6,7 +6,13 @@ const BPM_MIN = 80;
 const BPM_MAX = 180;
 const TARGET_PEAK = Math.pow(10, -1 / 20);
 
-// Accepts "120bpm", "bpm120", "_120_bpm", "120 BPM" and fractional values.
+// A tempo at the front of the name, as sample packs write it: "180 Classic
+// Amen", "124-house", "87.5_loop". Only plausible tempos count.
+const LEADING_BPM_MIN = 60;
+const LEADING_BPM_MAX = 250;
+
+// Accepts "120bpm", "bpm120", "_120_bpm", "120 BPM", a leading "180 ..." and
+// fractional values.
 export function inferBpmFromName(name: string): number | null {
   const patterns = [
     /(\d+(?:\.\d+)?)\s*[_-]?\s*bpm/i,
@@ -17,6 +23,12 @@ export function inferBpmFromName(name: string): number | null {
     if (!match) continue;
     const bpm = Number(match[1]);
     if (Number.isFinite(bpm) && bpm > 0) return bpm;
+  }
+
+  const leading = /^\s*(\d+(?:\.\d+)?)[ _-]/.exec(name);
+  if (leading) {
+    const bpm = Number(leading[1]);
+    if (Number.isFinite(bpm) && bpm >= LEADING_BPM_MIN && bpm <= LEADING_BPM_MAX) return bpm;
   }
   return null;
 }

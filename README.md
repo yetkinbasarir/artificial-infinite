@@ -145,21 +145,25 @@ pot, unity at the top. There is no distortion stage.
 Every sample needs a BPM, because the master build takes its tempo from it.
 The loader works it out for a whole batch of dropped files at once:
 
-1. A BPM in the file name (`120bpm`, `bpm120`, `128 BPM`, `87.5bpm`,
-   case-insensitive) is taken as given.
+1. A BPM in the file name is taken as given: `120bpm`, `bpm120`, `128 BPM`,
+   `87.5bpm` (case-insensitive), or a leading number as sample packs write it
+   (`180 Classic Amen`, `124-house`), accepted between 60 and 250 BPM.
 2. Otherwise the length is divided into 4, 8, 16 and 32 beats for candidate
    tempos, and a spectral flux onset envelope plus its autocorrelation gives an
    approximate tempo. The candidate closest to it wins, counting half and
    double as equally close.
 3. When a candidate and its double are equally plausible, the octave is settled
    from the batch: a sample whose length matches (or halves, or doubles) one
-   that names its BPM plays at that BPM (1 % tolerance). Failing that, the
-   candidate with 2.5–3.5 onsets per beat, and failing that the one inside
-   80–180 BPM.
+   that names its BPM (1 % tolerance) takes the candidate closest to that
+   sibling's tempo — the value itself always comes from its own length.
+   Failing that, the candidate with 2.5–3.5 onsets per beat, and failing that
+   the one inside 80–180 BPM.
 
-Each row shows where its BPM came from. Rows settled by length, by onset
-density, or with a tempo more than 4 % away from the estimate are marked: play
-them against the click to check. The preview button plays the loop with a
+Each row shows where its BPM came from. The chosen tempo is checked against the
+estimate allowing the half, double and three-against-two readings; rows are
+marked when the BPM came from the onset-density or 80–180 rule, or when no
+reading agrees within 4 %. A name or a length match is evidence enough to stay
+unmarked. Play a marked row against the click to check it. The preview button plays the loop with a
 click at its BPM, and the click can be switched off.
 
 Samples are placed in slots slowest first by centi-BPM, ties by name; editing a

@@ -10,7 +10,7 @@
 
 import { inferBpmFromName } from './audio';
 
-export type BpmSource = 'name' | 'analysis' | 'length' | 'onsets';
+export type BpmSource = 'name' | 'analysis' | 'length' | 'onsets' | 'range';
 
 export const BEAT_COUNTS = [4, 8, 16, 32] as const;
 export const PREFERRED_MIN_BPM = 80;
@@ -20,8 +20,11 @@ export const ONSETS_PER_BEAT_MIN = 2.5;
 export const ONSETS_PER_BEAT_MAX = 3.5;
 // Two lengths this close are the same loop, or the same loop twice over.
 export const LENGTH_TOLERANCE = 0.01;
-// Past this the chosen tempo no longer really agrees with the estimate.
+// Past this the chosen tempo no longer really agrees with the estimate. The
+// estimate often locks onto a related pulse, so the comparison also allows the
+// octave and the two-against-three relatives.
 export const APPROXIMATE_TOLERANCE = 0.04;
+export const AGREEMENT_FACTORS = [1, 2, 0.5, 1.5, 2 / 3] as const;
 // Candidates this close in octave terms cannot be told apart by the estimate.
 const OCTAVE_TIE = 0.05;
 
@@ -64,11 +67,21 @@ export function octaveDistance(a: number, b: number): number {
   return Math.abs(octaves - Math.round(octaves));
 }
 
-// Chosen tempo against the estimate, ignoring which octave each sits in.
+// Smallest distance between the chosen tempo and the estimate once the usual
+// half, double and three-against-two relations are allowed.
 export function approximateDeviation(bpm: number, approximate: number | null): number {
   if (!approximate || !(approximate > 0) || !(bpm > 0)) return 0;
-  const folded = bpm / Math.pow(2, Math.round(Math.log2(bpm / approximate)));
-  return Math.abs(folded - approximate) / approximate;
+  let best = Number.POSITIVE_INFINITY;
+  for (const factor of AGREEMENT_FACTORS) {
+    const deviation = Math.abs(bpm / factor - approximate) / approximate;
+    if (deviation < best) best = deviation;
+  }
+  return best;
+}
+
+export function tempoAgrees(bpm: number, approximate: number | null): boolean {
+  if (!approximate || !(approximate > 0)) return true;
+  return approximateDeviation(bpm, approximate) <= APPROXIMATE_TOLERANCE;
 }
 
 export function bpmCandidates(seconds: number): BpmCandidate[] {
@@ -231,6 +244,13 @@ export function countOnsets({ envelope, hopSeconds }: OnsetEnvelope): number {
   return count;
 }
 
+// Distance to a reference tempo in octaves: the reference itself wins over its
+// half or double, but those still beat anything further away.
+function referenceDistance(bpm: number, reference: number): number {
+  if (!(bpm > 0) || !(reference > 0)) return Number.POSITIVE_INFINITY;
+  return Math.abs(Math.log2(bpm / reference));
+}
+
 function lengthsMatch(a: number, b: number): boolean {
   for (const multiple of [1, 2, 0.5]) {
     const expected = b * multiple;
@@ -315,11 +335,18 @@ export function analyzeSampleBpm(
     if (tied.length > 1) {
       // 1. A sample of the same (or half, or double) length that names its BPM.
       const match = named.find((reference) => lengthsMatch(seconds, reference.seconds));
+      // The reference only settles which candidate to take; the tempo itself
+      // always comes from this sample's own length.
       const byLength = match
-        ? tied.find((entry) => octaveDistance(entry.candidate.bpm, match.bpm) < 0.01)
+        ? tied.reduce((best, entry) =>
+            referenceDistance(entry.candidate.bpm, match.bpm) <
+            referenceDistance(best.candidate.bpm, match.bpm)
+              ? entry
+              : best,
+          )
         : undefined;
-      if (match && byLength) {
-        chosen = { beats: Math.max(1, Math.round((match.bpm * seconds) / 60)), bpm: match.bpm };
+      if (byLength) {
+        chosen = byLength.candidate;
         source = 'length';
       } else {
         // 2. The candidate whose hit density looks like a breakbeat.
@@ -337,15 +364,16 @@ export function analyzeSampleBpm(
               entry.candidate.bpm >= PREFERRED_MIN_BPM && entry.candidate.bpm <= PREFERRED_MAX_BPM,
           );
           chosen = (inPreferred[0] ?? tied[0]).candidate;
+          source = 'range';
         }
       }
     }
 
     const onsetsPerBeat = chosen.beats > 0 ? onsets / chosen.beats : null;
+    // A name or a length match is evidence in itself; the weaker rules, and a
+    // tempo the estimate cannot agree with, are worth a listen.
     const flagged =
-      source === 'length' ||
-      source === 'onsets' ||
-      approximateDeviation(chosen.bpm, approximateBpm) > APPROXIMATE_TOLERANCE;
+      source === 'onsets' || source === 'range' || !tempoAgrees(chosen.bpm, approximateBpm);
 
     return { ...base, bpm: chosen.bpm, beats: chosen.beats, source, onsetsPerBeat, flagged };
   });
@@ -359,6 +387,8 @@ export function bpmSourceLabel(source: BpmSource): string {
       return 'matched by length';
     case 'onsets':
       return 'onset density';
+    case 'range':
+      return 'tempo range';
     default:
       return 'duration + analysis';
   }
