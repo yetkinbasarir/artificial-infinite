@@ -26,6 +26,13 @@ add_executable(transport_macro_test
 target_include_directories(transport_macro_test PRIVATE ../src)
 target_compile_options(transport_macro_test PRIVATE -Wall -Wextra -Werror)
 
+add_executable(looper_test
+  looper_test.cpp
+  ../src/Looper.cpp
+)
+target_include_directories(looper_test PRIVATE ../src)
+target_compile_options(looper_test PRIVATE -Wall -Wextra -Werror)
+
 add_executable(dsp_test
   dsp_test.cpp
 )
@@ -37,3 +44,4 @@ add_test(NAME clock_sync_test COMMAND clock_sync_test)
 add_test(NAME dsp_test COMMAND dsp_test)
 add_test(NAME tempo_engine_test COMMAND tempo_engine_test)
 add_test(NAME transport_macro_test COMMAND transport_macro_test)
+add_test(NAME looper_test COMMAND looper_test)

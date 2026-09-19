@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "ClockSource.h"
+#include "Looper.h"
 #include "MacroEngine.h"
 
 #if PIKO_CLOCK_INTERNAL
@@ -55,6 +56,19 @@ uint8_t piko_internal_clock_macro_pending_mode();
 // The macro's decision for the step about to play, taken at this instant
 // against the current intensity.
 piko::MacroStep piko_internal_clock_macro_step();
+
+// Looper (selector 6). Knob A holds or fades the loop, knob B sets the
+// recording velocity and, at its bottom, erases.
+void piko_internal_clock_looper_enable(bool on);
+void piko_internal_clock_looper_set_velocity(uint8_t velocity);
+void piko_internal_clock_looper_set_erasing(bool on);
+void piko_internal_clock_looper_press(uint8_t button, uint8_t slice, uint32_t now_ms);
+void piko_internal_clock_looper_release(uint8_t button, uint32_t now_ms);
+void piko_internal_clock_looper_close(uint32_t now_ms);
+bool piko_internal_clock_looper_recording();
+bool piko_internal_clock_looper_defined();
+// One loop event to play, taken once.
+bool piko_internal_clock_consume_loop_trigger(piko::LoopTrigger* trigger);
 
 // Tempo at the last tick, and the audio-rate interpolation between ticks.
 uint32_t piko_internal_clock_tempo_x100();

@@ -15,6 +15,7 @@ struct TransportTick {
   bool bar = false;       // a bar line was crossed
   bool period = false;    // a macro variation period started
   bool playing = false;
+  uint32_t advanced = 0;  // musical ticks covered by this clock tick
   uint32_t position = 0;  // musical tick
   uint32_t step_index = 0;
   uint32_t bar_index = 0;

@@ -75,6 +75,7 @@ TransportTick Transport::advanceRawTick() {
   if (start_requested_) {
     startNow(tick);
     tick.playing = true;
+    tick.advanced = 1;
     tick.position = position_;
     tick.step_index = position_ / kTicksPerStep;
     tick.bar_index = position_ / kTicksPerBar;
@@ -109,6 +110,7 @@ TransportTick Transport::advanceRawTick() {
     tick.period = true;
   }
 
+  tick.advanced = advance;
   for (uint32_t i = 0; i < advance; ++i) {
     ++position_;
     // Only the last boundary of a burst triggers, so these just accumulate.

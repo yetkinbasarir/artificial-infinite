@@ -31,6 +31,7 @@ set(PIKOCODE_SOURCES
 	${CMAKE_CURRENT_LIST_DIR}/src/TempoEngine.cpp
 	${CMAKE_CURRENT_LIST_DIR}/src/Transport.cpp
 	${CMAKE_CURRENT_LIST_DIR}/src/MacroEngine.cpp
+	${CMAKE_CURRENT_LIST_DIR}/src/Looper.cpp
 	${CMAKE_CURRENT_LIST_DIR}/src/InternalClock.cpp
 	${CMAKE_CURRENT_LIST_DIR}/doth/WS2812.cpp 
 	${CMAKE_CURRENT_LIST_DIR}/doth/usb_descriptors.c

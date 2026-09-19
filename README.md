@@ -79,6 +79,46 @@ period length from the intensity when the period starts. Periods are 8, 4, 2 or 
 | 4 Reverse | Up to 60 % of the steps play backwards; past half the knob some of them jump as well | 2 bars → 1 beat |
 | 5 Abstract | One chain: gates and thinning, then jumps, then a few shortest-gate rolls | 8 bars → 1 beat |
 
+#### Looper (selector 6)
+
+The looper replaces the sequencer on the master build; nothing it records ever
+reaches flash.
+
+- **Knob A** holds the loop on its right half and lets it fade on the left.
+  **Knob B** sets the recording velocity, and its bottom tenth is the erase
+  zone. Both knobs pick up rather than jump.
+- With no loop yet and knob A on, the first button press starts recording. The
+  loop begins at the top of the beat that press fell in, so the press keeps its
+  place inside the beat. Presses are stored at tick resolution against the
+  player's position, up to 256 of them, so a nudge carries the loop too.
+- Pressing a second button while one is down closes the loop, rounded to the
+  nearest beat and never shorter than one. The loop returns to its start and
+  plays at once. If the second press came within 50 ms of the first, that first
+  press is taken back out — the gesture is not recorded. Left open, the loop
+  closes itself at eight bars.
+- Once closed, further presses overdub. Where two events land on the same tick,
+  the one pressed last is heard. Each event plays its slice for as long as the
+  button was held, at the velocity it was recorded with.
+- Holding a button while knob B sits in the erase zone takes that button's
+  events out of the loop, and records nothing meanwhile.
+- With knob A off the loop keeps playing but loses a quarter of its velocity
+  every pass; events that fall below the floor go, and once none are left the
+  loop is free for a new recording.
+- The loop plays on whatever the selector shows. Two buttons together only
+  close the loop on selector 6; elsewhere they still start a retrigger.
+- Stopping the transport keeps the loop and silences it; starting plays it from
+  its own beginning alongside the first step.
+
+#### Freeze (selector 8, knob A)
+
+The right half of the knob holds the slice that was playing and retriggers it
+at every step boundary, from the next boundary on. While it is held, nothing
+else picks the slice: no jumps, tunnel, reverse, gate, retrigger chance, macro,
+loop event or live button. The musical position, the macro counters and the
+loop keep running underneath, so letting go returns the player to where it
+would have been. Knob B on this selector does nothing, and its buttons are
+ordinary slice buttons.
+
 #### Nudge (selector 1 buttons)
 
 On selector 1 the eight buttons do not fire slices: they shift the player
@@ -175,9 +215,9 @@ selector 1 is chosen.
 | 3        | Noise gate threshold            | Gate probability            |
 | 4        | Jump probability                | Retrigger probability       |
 | 5        | Tunnel probability              | Reverse probability         |
-| 6        | Sequencer record                | Sequencer play              |
+| 6        | **Looper** hold/fade (master) / Sequencer record (follower) | **Record velocity + erase** (master) / Sequencer play (follower) |
 | 7        | **Macro intensity** (master) / Save (follower) | **Macro mode** (master) / Load (follower) |
-| 8        | — (free on master) / **Volume** (follower) | — (free)         |
+| 8        | **Freeze** (master) / **Volume** (follower) | — (free)         |
 
 **DJ filter (selector 2, knob A).** One pot sweeps a 4th-order Linkwitz-Riley
 isolator. The middle of the pot (±5 %) is a hard bypass: audio passes through

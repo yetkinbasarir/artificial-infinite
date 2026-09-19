@@ -201,6 +201,13 @@ external flag.
   does nothing there, the output gain is fixed at full level, and the volume
   variables and the `SAVE_VOLUME` slot are compiled out. The mute ramp is
   unaffected. The follower build keeps the linear volume knob.
+- Looper and freeze on the master build: `src/Looper.{h,cpp}` records button
+  presses against the player's musical position at tick resolution (256 events,
+  RAM only), closes on a two-button gesture rounded to the beat or by itself at
+  eight bars, overdubs, erases per button, and fades a quarter of its velocity
+  per pass while its knob is off. It replaces the sequencer there, which is
+  compiled out. Freeze on selector 8 / knob A holds the playing slice and
+  retriggers it every step while everything else keeps counting underneath.
 - Loader tempo analysis: `web/src/bpm.ts` analyses a dropped batch together
   (spectral flux onset envelope over a hand-written radix-2 FFT, autocorrelation
   with a log-normal tempo prior, octave settled by length matches within the

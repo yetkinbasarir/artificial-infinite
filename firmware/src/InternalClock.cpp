@@ -2,6 +2,7 @@
 
 #if PIKO_CLOCK_INTERNAL
 
+#include "Looper.h"
 #include "MacroEngine.h"
 #include "SpscQueue.h"
 #include "TempoEngine.h"
@@ -30,6 +31,10 @@ SpscQueue<piko::TickPlan, kPlanQueueSize> plan_queue;
 // Touched by the tick interrupt and read by the main loop and the audio path.
 piko::Transport transport;
 piko::MacroEngine macro;
+piko::Looper looper;
+
+volatile bool loop_trigger_pending = false;
+piko::LoopTrigger loop_trigger{};
 
 int alarm_num = -1;
 volatile bool clock_running = false;
@@ -106,6 +111,16 @@ void __not_in_flash_func(clock_alarm_handler)(uint alarm) {
       macro_step_index = tick.step_index;
       step_pending = true;
     }
+    // The loop runs at tick resolution; a nudge carries it along. Only the
+    // last event of a burst is played, as with steps.
+    for (uint32_t i = 0; i < tick.advanced; ++i) {
+      const uint32_t at = tick.position - (tick.advanced - 1u - i);
+      const piko::LoopTrigger hit = looper.tick(at);
+      if (hit.trigger) {
+        loop_trigger = hit;
+        loop_trigger_pending = true;
+      }
+    }
   }
 
   next_target_us += period_us;
@@ -133,9 +148,11 @@ void __not_in_flash_func(transport_button_irq)(uint gpio, uint32_t events) {
   } else {
     transport.requestStart();
     restart_pending = true;
-    // Starting redraws the pattern along with the counters it resets.
+    // Starting redraws the pattern along with the counters it resets, and the
+    // loop starts from its own beginning.
     macro.beginPeriod(0);
     macro.beginBar();
+    looper.onTransportStart(0);
   }
 }
 
@@ -182,6 +199,7 @@ void piko_internal_clock_init(uint32_t tempo_x100) {
   tempo_engine.reset(tempoQ16FromX100(tempo_x100));
   transport.reset();
   macro.reset();
+  looper.reset();
   transport.setPeriodTicks(macro.periodTicks());
 
   plan_queue.clear();
@@ -281,6 +299,44 @@ uint8_t piko_internal_clock_macro_pending_mode() { return macro.pendingMode(); }
 
 piko::MacroStep piko_internal_clock_macro_step() {
   return macro.resolveStep(macro_step_index);
+}
+
+void piko_internal_clock_looper_enable(bool on) { looper.setEnabled(on); }
+
+void piko_internal_clock_looper_set_velocity(uint8_t velocity) {
+  looper.setVelocity(velocity);
+}
+
+void piko_internal_clock_looper_set_erasing(bool on) { looper.setErasing(on); }
+
+void piko_internal_clock_looper_press(uint8_t button, uint8_t slice,
+                                      uint32_t now_ms) {
+  const uint32_t interrupts = save_and_disable_interrupts();
+  looper.pressButton(button, slice, transport.position(), now_ms);
+  restore_interrupts(interrupts);
+}
+
+void piko_internal_clock_looper_release(uint8_t button, uint32_t now_ms) {
+  const uint32_t interrupts = save_and_disable_interrupts();
+  looper.releaseButton(button, transport.position(), now_ms);
+  restore_interrupts(interrupts);
+}
+
+void piko_internal_clock_looper_close(uint32_t now_ms) {
+  const uint32_t interrupts = save_and_disable_interrupts();
+  looper.closeLoop(transport.position(), now_ms);
+  restore_interrupts(interrupts);
+}
+
+bool piko_internal_clock_looper_recording() { return looper.recording(); }
+
+bool piko_internal_clock_looper_defined() { return looper.defined(); }
+
+bool piko_internal_clock_consume_loop_trigger(piko::LoopTrigger* trigger) {
+  if (!loop_trigger_pending || trigger == nullptr) return false;
+  *trigger = loop_trigger;
+  loop_trigger_pending = false;
+  return true;
 }
 
 uint32_t piko_internal_clock_tempo_x100() {

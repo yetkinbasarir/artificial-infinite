@@ -207,8 +207,10 @@ uint8_t noise_gate_fade = 0;
 bool button_trigger[8] = {false, false, false, false,
                           false, false, false, false};
 
+#if !PIKO_CLOCK_INTERNAL
 // sequencer
 Sequencer sequencer;
+#endif
 
 // clock input
 volatile uint8_t pulse_ppqn = 24;
@@ -256,6 +258,21 @@ uint16_t fade_sample = 0;
 uint32_t fade_phase = 0;
 bool fade_direction = true;
 uint32_t fade_frames_left = 0;
+
+// Looper (selector 6) and freeze (selector 8 / knob A).
+bool looper_enabled = false;
+bool looper_knob_a_captured = false;
+uint16_t looper_knob_a_smoothed = 0;
+bool looper_knob_b_captured = false;
+uint16_t looper_knob_b_smoothed = 0;
+static constexpr uint16_t kLooperEraseZone = (kKnobMax * 10u) / 100u;
+bool freeze_enabled = false;
+bool freeze_active = false;
+uint16_t freeze_slice = 0;
+bool freeze_knob_captured = false;
+uint16_t freeze_knob_smoothed = 0;
+// Loop events play at their recorded velocity.
+uint16_t step_gain_q8 = 256;
 
 // Nudge buttons (selector 1) shift the player, they do not trigger slices.
 static const int8_t kNudgeTicks[NUM_BUTTONS] = {1, 6, 12, 24, -24, -12, -6, -1};
@@ -372,6 +389,14 @@ bool knob_pickup(bool &captured, uint16_t &smoothed, uint16_t knob,
   smoothed = (uint16_t)((int32_t)smoothed +
                         ((int32_t)knob - (int32_t)smoothed) / 4);
   return true;
+}
+
+// A switch in the middle of a pot, with a dead band either side of it.
+bool knob_switch(uint16_t value, bool current) {
+  const uint16_t middle = (kKnobMax + 1u) / 2u;
+  const uint16_t hysteresis = kMacroModeHysteresis;
+  if (current) return value + hysteresis > middle;
+  return value > middle + hysteresis;
 }
 
 // Five equal zones with a 2 % dead band either side of each boundary.
@@ -1056,6 +1081,30 @@ void pwm_interrupt_handler() {
     }
   }
 
+#if PIKO_CLOCK_INTERNAL
+  // A recorded loop event fires its own slice, on top of the step grid and
+  // with the velocity it was played at. Freeze holds the slice, so the loop
+  // stays silent while it is on.
+  piko::LoopTrigger loop_hit;
+  if (piko_internal_clock_consume_loop_trigger(&loop_hit) && !freeze_active &&
+      !timestretch_active && !fx_retrig && piko_audio_sample_count() > 0 &&
+      sample_beats > 0) {
+    select_beat = loop_hit.slice % sample_beats;
+    phase_head = 1 - phase_head;
+    phase_xfade = 1 << HEAD_SHIFT;
+    phase_sample[phase_head] =
+        select_beat * (sample_frames_per_slice << flag_half_time);
+    direction[phase_head] = base_direction;
+    restart_slice_window();
+    // The event lasts as long as the button was held.
+    const uint32_t held = (uint32_t)((uint64_t)slice_frames_remaining *
+                                     loop_hit.ticks / piko::kTicksPerStep);
+    slice_frames_remaining = held == 0 ? 1u : held;
+    step_gain_q8 = (uint16_t)loop_hit.velocity + 1u;
+    noise_gate_val = 0;
+  }
+#endif
+
   // disable beat interrupts during fx
   if (fx_retrig && !timestretch_active) {
     beat_onset = false;
@@ -1106,7 +1155,11 @@ void pwm_interrupt_handler() {
       if (beat_onset && fx_retrig == false) {
         bool do_switch_heads = true;
 
-        if (probability_tunnel > 0) {
+        if (probability_tunnel > 0
+#if PIKO_CLOCK_INTERNAL
+            && !freeze_active
+#endif
+        ) {
           if (randint(0, 255) < probability_tunnel) {
             sample_add = randint(0, piko_audio_sample_count() - 1);
           } else {
@@ -1147,13 +1200,24 @@ void pwm_interrupt_handler() {
 
         beat_onset = false;
 #if PIKO_CLOCK_INTERNAL
+        // Freeze takes hold from this step boundary, on the slice that was
+        // playing when its knob went over.
+        if (freeze_enabled && !freeze_active) {
+          freeze_active = true;
+          freeze_slice = select_beat;
+        } else if (!freeze_enabled && freeze_active) {
+          freeze_active = false;
+        }
         // The slice comes from where the player sits musically, so a nudge
         // carries the sequence with it.
         select_beat = piko_internal_clock_step_index() % sample_beats;
-        const piko::MacroStep macro_step = piko_internal_clock_macro_step();
+        const piko::MacroStep macro_step =
+            freeze_active ? piko::MacroStep{} : piko_internal_clock_macro_step();
         if (macro_step.jump && sample_beats > 1) {
           select_beat = macro_step.jump_slice % sample_beats;
         }
+        if (freeze_active) select_beat = freeze_slice % sample_beats;
+        step_gain_q8 = 256;
 #else
         // Position always comes from the global beat counter, so boards fed
         // the same clock and reset land on the same slice.
@@ -1176,7 +1240,11 @@ void pwm_interrupt_handler() {
         }
 
         // random jumps
+#if PIKO_CLOCK_INTERNAL
+        if (!freeze_active && probability_jump > 0) {
+#else
         if (probability_jump > 0) {
+#endif
           if (randint(0, 255) < probability_jump) {
             select_beat = randint(0, sample_beats - 1);
           }
@@ -1203,6 +1271,7 @@ void pwm_interrupt_handler() {
         // printf("button_on2: %d\n", button_on2);
         // printf("select_beat: %d\n", select_beat);
 
+#if !PIKO_CLOCK_INTERNAL
         // get beat from sequencer
         if (sequencer.IsPlaying()) {
           select_beat = sequencer.Next(beat_num_total);
@@ -1211,12 +1280,19 @@ void pwm_interrupt_handler() {
                  select_beat);
 #endif
         }
+#endif
 
         // hold button down to play that beat
+#if PIKO_CLOCK_INTERNAL
+        if (!freeze_active && button_on < NUM_BUTTONS) {
+#else
         if (button_on < NUM_BUTTONS) {
+#endif
           select_beat = (button_on + select_beat_freeze) % sample_beats;
+#if !PIKO_CLOCK_INTERNAL
           // record the current beat
           sequencer.Record(select_beat);
+#endif
         }
 #ifdef DEBUG_PWM
         printf("select_beat:%d for %d samples\n", select_beat,
@@ -1262,7 +1338,11 @@ void pwm_interrupt_handler() {
 #endif
 
         // random direction for the new head
+#if PIKO_CLOCK_INTERNAL
+        if (!freeze_active && probability_direction > 0) {
+#else
         if (probability_direction > 0) {
+#endif
           uint8_t r1 = randint(0, 255);
           if (direction[phase_head] == base_direction) {
             if (r1 < probability_direction) {
@@ -1431,6 +1511,16 @@ void pwm_interrupt_handler() {
       --fade_frames_left;
     }
   }
+#endif
+
+#if PIKO_CLOCK_INTERNAL
+  // <velocity> how hard the loop event was played
+  if (step_gain_q8 < 256 && audio_now != 128) {
+    const int32_t scaled =
+        128 + (((int32_t)audio_now - 128) * (int32_t)step_gain_q8) / 256;
+    audio_now = (uint8_t)(scaled < 0 ? 0 : (scaled > 255 ? 255 : scaled));
+  }
+  // </velocity>
 #endif
 
   // <envelope> noise gate and the retrigger volume shape
@@ -1610,8 +1700,10 @@ int main(void) {
     input_knob[i].Init(i, 50);
   }
 
+#if !PIKO_CLOCK_INTERNAL
   // initialize sequencer
   sequencer.Init();
+#endif
 
   // initialize the DJ filter in bypass until the pot is moved
   dj_filter_init(&dj_filter);
@@ -1723,9 +1815,11 @@ int main(void) {
       const uint8_t knob_b_led =
           input_knob[2].Value() * 120 / input_knob[2].ValueMax();
       if (debounce_led_save > 0) debounce_led_save--;
+#if !PIKO_CLOCK_INTERNAL
       if (sequencer.IsPlaying() && debounce_led_sequencer > 0) {
         debounce_led_sequencer--;
       }
+#endif
       if (debounce_led_load > 0) debounce_led_load--;
       ledStrip.fill(WS2812::RGB(knob_a_led, 0, knob_b_led));
       ledStrip.show();
@@ -1881,7 +1975,9 @@ int main(void) {
                                                ? RESTART_ON_START_ENABLED
                                                : RESTART_ON_START_DISABLED;
         configure_clock_capture();
+#if !PIKO_CLOCK_INTERNAL
         sequencer.Load(save_data);
+#endif
 #ifdef DEBUG_SAVE
 #if !PIKO_CLOCK_INTERNAL
         printf("volume_gain: %d\n", volume_gain);
@@ -1985,6 +2081,31 @@ int main(void) {
 #endif
       }
 
+#if PIKO_CLOCK_INTERNAL
+      // Selector 6: the buttons play slices and feed the looper. Two down
+      // together closes the loop.
+      if (selector_knob == 5) {
+        const uint32_t now_ms = current_time();
+        uint8_t held = 0;
+        for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+          if (input_button[i].On()) held++;
+        }
+        for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+          if (input_button[i].Rising()) {
+            if (held > 1 && piko_internal_clock_looper_recording()) {
+              piko_internal_clock_looper_close(now_ms);
+            } else {
+              const uint8_t slice =
+                  (uint8_t)((i + select_beat_freeze) % (sample_beats > 0 ? sample_beats : 1));
+              piko_internal_clock_looper_press(i, slice, now_ms);
+            }
+          } else if (input_button[i].Falling()) {
+            piko_internal_clock_looper_release(i, now_ms);
+          }
+        }
+      }
+#endif
+
       // adc reading
       if (!btn_retrig) {
         for (uint8_t i = 0; i < NUM_KNOBS; i++) {
@@ -2017,6 +2138,9 @@ int main(void) {
                 tempo_knob_captured = false;
                 macro_intensity_captured = false;
                 macro_mode_captured = false;
+                looper_knob_a_captured = false;
+                looper_knob_b_captured = false;
+                freeze_knob_captured = false;
 #else
                 has_saved = false;
 #endif
@@ -2027,7 +2151,9 @@ int main(void) {
               }
               ledarray_sel = selector_knob;
               ledarray_sel_debounce = 16000;
+#if !PIKO_CLOCK_INTERNAL
               sequencer.SetRecording(false);
+#endif
               if (first_time) {
                 first_time = false;
                 break;
@@ -2098,6 +2224,21 @@ int main(void) {
                   save_data[PIKO_SAVE_PROB_TUNNEL] = probability_tunnel;
                   break;
                 case 5:
+#if PIKO_CLOCK_INTERNAL
+                  // Looper: the left half lets the loop fade, the right half
+                  // records and holds it.
+                  if (knob_pickup(looper_knob_a_captured, looper_knob_a_smoothed,
+                                  input_knob[i].Value(), looper_knob_a_smoothed,
+                                  kMacroPickupWindow)) {
+                    const bool on = knob_switch(looper_knob_a_smoothed,
+                                                looper_enabled);
+                    if (on != looper_enabled) {
+                      looper_enabled = on;
+                      piko_internal_clock_looper_enable(on);
+                    }
+                  }
+                  break;
+#else
                   // sequencer rec
                   if (input_knob[i].Value() > 3500) {
                     sequencer.SetRecording(true);
@@ -2108,6 +2249,7 @@ int main(void) {
                     }
                   }
                   break;
+#endif
                 case 6:
 #if PIKO_CLOCK_INTERNAL
                   // Macro intensity.
@@ -2135,8 +2277,13 @@ int main(void) {
 #endif
                 case 7:
 #if PIKO_CLOCK_INTERNAL
-                  // The master build has no volume control: the output runs
-                  // at full level and only the mute ramp touches it.
+                  // Freeze: the right half holds the slice that is playing.
+                  if (knob_pickup(freeze_knob_captured, freeze_knob_smoothed,
+                                  input_knob[i].Value(), freeze_knob_smoothed,
+                                  kMacroPickupWindow)) {
+                    freeze_enabled = knob_switch(freeze_knob_smoothed,
+                                                 freeze_enabled);
+                  }
                   break;
 #else
                   // volume
@@ -2234,12 +2381,34 @@ int main(void) {
                   save_data[PIKO_SAVE_PROB_DIRECTION] = probability_direction;
                   break;
                 case 5:
+#if PIKO_CLOCK_INTERNAL
+                  // Recording velocity, with the bottom tenth as the erase
+                  // zone.
+                  if (knob_pickup(looper_knob_b_captured, looper_knob_b_smoothed,
+                                  input_knob[i].Value(), looper_knob_b_smoothed,
+                                  kMacroPickupWindow)) {
+                    const bool erasing = looper_knob_b_smoothed < kLooperEraseZone;
+                    piko_internal_clock_looper_set_erasing(erasing);
+                    if (!erasing) {
+                      const uint32_t span = kKnobMax - kLooperEraseZone;
+                      const uint32_t velocity =
+                          1u + ((uint32_t)(looper_knob_b_smoothed -
+                                           kLooperEraseZone) *
+                                254u) /
+                                   (span > 0 ? span : 1u);
+                      piko_internal_clock_looper_set_velocity(
+                          (uint8_t)(velocity > 255u ? 255u : velocity));
+                    }
+                  }
+                  break;
+#else
                   // sequencer on
                   sequencer.SetPlaying(input_knob[i].Value() > 2200);
                   if (sequencer.IsPlaying()) {
                     debounce_led_sequencer = 255;
                   }
                   break;
+#endif
                 case 6:
 #if PIKO_CLOCK_INTERNAL
                   // Macro mode, taking effect on the next bar line.
@@ -2290,12 +2459,15 @@ int main(void) {
       ledarray.Set((macro_mode_selected - 1u) % NUM_LEDS, 950);
     } else
 #endif
+#if !PIKO_CLOCK_INTERNAL
     if (sequencer.IsRecording()) {
       ledarray.Clear();
       if (sequencer.Last() < 255) {
         ledarray.Set(sequencer.Last() % NUM_BUTTONS, 10000);
       }
-    } else {
+    } else
+#endif
+    {
       ledarray.Clear();
       if (ledarray_sel_debounce > 0) {
         ledarray_sel_debounce--;
