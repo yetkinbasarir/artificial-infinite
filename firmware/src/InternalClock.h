@@ -52,7 +52,8 @@ void piko_internal_clock_set_macro_intensity(uint16_t intensity);
 void piko_internal_clock_set_macro_mode(uint8_t mode);
 uint8_t piko_internal_clock_macro_mode();
 uint8_t piko_internal_clock_macro_pending_mode();
-// The macro's plan for the step about to play.
+// The macro's decision for the step about to play, taken at this instant
+// against the current intensity.
 piko::MacroStep piko_internal_clock_macro_step();
 
 // Tempo at the last tick, and the audio-rate interpolation between ticks.

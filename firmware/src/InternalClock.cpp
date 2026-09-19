@@ -38,8 +38,6 @@ volatile bool step_pending = false;
 volatile bool restart_pending = false;
 volatile bool stop_pending = false;
 volatile bool bar_pending_glide = false;
-volatile bool macro_prepare_pending = false;
-volatile uint32_t macro_next_period = 0;
 volatile uint32_t macro_step_index = 0;
 
 // Published by the tick interrupt for audio-rate interpolation.
@@ -93,14 +91,15 @@ void __not_in_flash_func(clock_alarm_handler)(uint alarm) {
   const piko::TransportTick tick = transport.advanceRawTick();
   if (tick.playing) {
     if (tick.period) {
-      // The pattern for this period was drawn in advance.
-      macro.takePrepared(tick.period_index);
-      macro_next_period = tick.period_index + 1u;
-      macro_prepare_pending = true;
+      // Drawing the dice for a period is a handful of shifts per step.
+      macro.beginPeriod(tick.period_index);
       transport.setPeriodTicks(macro.periodTicks());
     }
     if (tick.bar) {
-      macro.applyPendingMode();
+      // A new mode redraws the dice at once, and the euclidean count is
+      // latched from the intensity of this bar.
+      if (macro.applyPendingMode()) macro.beginPeriod(tick.period_index);
+      macro.beginBar();
       bar_pending_glide = true;
     }
     if (tick.step) {
@@ -134,6 +133,9 @@ void __not_in_flash_func(transport_button_irq)(uint gpio, uint32_t events) {
   } else {
     transport.requestStart();
     restart_pending = true;
+    // Starting redraws the pattern along with the counters it resets.
+    macro.beginPeriod(0);
+    macro.beginBar();
   }
 }
 
@@ -205,10 +207,6 @@ void piko_internal_clock_service() {
     bar_pending_glide = false;
     // The bar line has passed: start the glide and let the sample change.
     if (tempo_engine.startPendingGlide()) sample_swap_pending = true;
-  }
-  if (macro_prepare_pending) {
-    macro_prepare_pending = false;
-    macro.prepareNextPeriod(macro_next_period);
   }
   // Keep exactly one tick ready. Planning further ahead would make a bar
   // decision wait past the line it belongs to.
@@ -282,7 +280,7 @@ uint8_t piko_internal_clock_macro_mode() { return macro.mode(); }
 uint8_t piko_internal_clock_macro_pending_mode() { return macro.pendingMode(); }
 
 piko::MacroStep piko_internal_clock_macro_step() {
-  return macro.step(macro_step_index);
+  return macro.resolveStep(macro_step_index);
 }
 
 uint32_t piko_internal_clock_tempo_x100() {

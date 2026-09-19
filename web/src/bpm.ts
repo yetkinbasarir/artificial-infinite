@@ -12,6 +12,26 @@ import { inferBpmFromName } from './audio';
 
 export type BpmSource = 'name' | 'analysis' | 'length' | 'onsets' | 'range';
 
+// The firmware plays between these; anything outside is doubled or halved
+// until it fits.
+export const TEMPO_MIN_BPM = 40;
+export const TEMPO_MAX_BPM = 300;
+
+export function foldBpmIntoRange(bpm: number): { bpm: number; folded: boolean } {
+  if (!(bpm > 0)) return { bpm, folded: false };
+  let value = bpm;
+  let folded = false;
+  while (value < TEMPO_MIN_BPM) {
+    value *= 2;
+    folded = true;
+  }
+  while (value > TEMPO_MAX_BPM) {
+    value /= 2;
+    folded = true;
+  }
+  return { bpm: value, folded };
+}
+
 export const BEAT_COUNTS = [4, 8, 16, 32] as const;
 export const PREFERRED_MIN_BPM = 80;
 export const PREFERRED_MAX_BPM = 180;
@@ -59,6 +79,7 @@ export interface BpmAnalysis {
   seconds: number;
   candidates: BpmCandidate[];
   flagged: boolean;
+  folded: boolean;  // doubled or halved to reach the playable range
 }
 
 export function octaveDistance(a: number, b: number): number {
@@ -306,18 +327,28 @@ export function analyzeSampleBpm(
     const base = { id: input.id, seconds, candidates, approximateBpm };
 
     if (namedBpm != null) {
+      const named = foldBpmIntoRange(namedBpm);
       return {
         ...base,
-        bpm: namedBpm,
-        beats: Math.max(1, Math.round((namedBpm * seconds) / 60)),
+        bpm: named.bpm,
+        beats: Math.max(1, Math.round((named.bpm * seconds) / 60)),
         source: 'name' as const,
         onsetsPerBeat: null,
         flagged: false,
+        folded: named.folded,
       };
     }
 
     if (candidates.length === 0) {
-      return { ...base, bpm: 0, beats: 8, source: 'analysis' as const, onsetsPerBeat: null, flagged: true };
+      return {
+        ...base,
+        bpm: 0,
+        beats: 8,
+        source: 'analysis' as const,
+        onsetsPerBeat: null,
+        flagged: true,
+        folded: false,
+      };
     }
 
     const inRange = candidates.filter(
@@ -374,8 +405,17 @@ export function analyzeSampleBpm(
     // tempo the estimate cannot agree with, are worth a listen.
     const flagged =
       source === 'onsets' || source === 'range' || !tempoAgrees(chosen.bpm, approximateBpm);
+    const folded = foldBpmIntoRange(chosen.bpm);
 
-    return { ...base, bpm: chosen.bpm, beats: chosen.beats, source, onsetsPerBeat, flagged };
+    return {
+      ...base,
+      bpm: folded.bpm,
+      beats: chosen.beats,
+      source,
+      onsetsPerBeat,
+      flagged,
+      folded: folded.folded,
+    };
   });
 }
 

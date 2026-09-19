@@ -237,11 +237,19 @@ uint16_t macro_intensity_smoothed = 0;
 bool macro_mode_captured = false;
 uint16_t macro_mode_smoothed = 0;
 uint8_t macro_mode_selected = 1;
-uint32_t macro_mode_led_debounce = 0;
+uint64_t macro_mode_led_until_us = 0;
 
-// Stopping fades the output over five milliseconds instead of cutting it.
-static constexpr uint32_t kTransportFadeFrames = 120u;  // 5 ms at 24 kHz
-uint32_t transport_fade_frames = 0;
+// Every mute and unmute, whatever asked for it, rides the same 5 ms ramp.
+// The carrier runs at ~121 kHz, so 5 ms is 605 interrupts.
+static constexpr uint32_t kMuteRampStep = 65536u / 605u;
+uint32_t mute_gain_q16 = 0;
+
+// A new sample starts at full level; the old read head fades out over 8 ms.
+static constexpr uint32_t kSampleFadeFrames = 192u;  // 8 ms at 24 kHz
+uint16_t fade_sample = 0;
+uint32_t fade_phase = 0;
+bool fade_direction = true;
+uint32_t fade_frames_left = 0;
 
 // Nudge buttons (selector 1) shift the player, they do not trigger slices.
 static const int8_t kNudgeTicks[NUM_BUTTONS] = {1, 6, 12, 24, -24, -12, -6, -1};
@@ -760,11 +768,8 @@ bool service_clock_transport(uint32_t& now_us) {
   // clock itself keeps running underneath.
   if (piko_internal_clock_consume_restart()) {
     restart_loop_from_beginning();
-    transport_fade_frames = 0;
   }
-  if (piko_internal_clock_consume_stop()) {
-    transport_fade_frames = kTransportFadeFrames;
-  }
+  (void)piko_internal_clock_consume_stop();
   (void)clock_sync.advanceCarrier(now_us);
   return piko_internal_clock_consume_step();
 #else
@@ -796,6 +801,31 @@ void pwm_interrupt_handler() {
   }
   clock_was_running = clock_running;
 
+#if PIKO_CLOCK_INTERNAL
+  // One ramp for every reason to go quiet: the transport, the serial stop
+  // command and a bank write all fade instead of cutting.
+  const bool want_audio = piko_internal_clock_playing() && !do_mute &&
+                          !piko_audio_bank_mutating() &&
+                          piko_audio_sample_count() > 0;
+  if (want_audio) {
+    mute_gain_q16 = mute_gain_q16 + kMuteRampStep >= 65536u
+                        ? 65536u
+                        : mute_gain_q16 + kMuteRampStep;
+  } else {
+    mute_gain_q16 =
+        mute_gain_q16 <= kMuteRampStep ? 0u : mute_gain_q16 - kMuteRampStep;
+    if (transport_beat) {
+      ++beat_num_total;
+      beat_onset = true;
+      resume_transport_phase = true;
+    }
+    // Hold the last sample and ride it down; a bank write must not read flash.
+    const int32_t held = 128 + (((int32_t)audio_now - 128) *
+                                (int32_t)mute_gain_q16 / 65536);
+    set_audio_pwm_level((uint8_t)(held < 0 ? 0 : (held > 255 ? 255 : held)));
+    return;
+  }
+#else
   if (piko_audio_bank_mutating() || piko_audio_sample_count() == 0) {
     if (transport_beat) {
       ++beat_num_total;
@@ -830,6 +860,7 @@ void pwm_interrupt_handler() {
     // return;
     // }
   }
+#endif
 
   if (resume_transport_phase && beat_onset && sample_beats > 0) {
     select_beat =
@@ -1086,19 +1117,39 @@ void pwm_interrupt_handler() {
           sample_set = sample_change;
         }
 #endif
+#if PIKO_CLOCK_INTERNAL
+        const uint16_t previous_sample = sample;
+        const uint32_t previous_phase = phase_sample[phase_head];
+        const bool previous_direction = direction[phase_head];
+#endif
         sample = (sample_set + sample_add) % piko_audio_sample_count();
         refresh_sample_timing(sample);
         restart_slice_window();
+#if PIKO_CLOCK_INTERNAL
+        // The new sample enters at full level with its attack intact; the old
+        // read head keeps playing for 8 ms and fades out.
+        const bool sample_changed = sample != previous_sample;
+        if (sample_changed) {
+          fade_sample = previous_sample;
+          fade_phase = previous_phase;
+          fade_direction = previous_direction;
+          fade_frames_left = kSampleFadeFrames;
+        }
+#endif
 
         beat_onset = false;
-        // Position always comes from the global beat counter, so boards fed
-        // the same clock and reset land on the same slice.
-        select_beat = beat_num_total % sample_beats;
 #if PIKO_CLOCK_INTERNAL
+        // The slice comes from where the player sits musically, so a nudge
+        // carries the sequence with it.
+        select_beat = piko_internal_clock_step_index() % sample_beats;
         const piko::MacroStep macro_step = piko_internal_clock_macro_step();
         if (macro_step.jump && sample_beats > 1) {
           select_beat = macro_step.jump_slice % sample_beats;
         }
+#else
+        // Position always comes from the global beat counter, so boards fed
+        // the same clock and reset land on the same slice.
+        select_beat = beat_num_total % sample_beats;
 #endif
         if (flag_half_time) {
           select_beat++;
@@ -1167,7 +1218,13 @@ void pwm_interrupt_handler() {
 
         if (do_switch_heads) {
           phase_head = 1 - phase_head;  // switch heads
+#if PIKO_CLOCK_INTERNAL
+          // A sample change has its own fade; crossfading the heads here would
+          // only blend two positions of the new sample.
+          phase_xfade = sample_changed ? 0 : (1 << HEAD_SHIFT);
+#else
           phase_xfade = 1 << HEAD_SHIFT;
+#endif
         }
         phase_sample[phase_head] =
             select_beat * (sample_frames_per_slice << flag_half_time);
@@ -1345,15 +1402,25 @@ void pwm_interrupt_handler() {
   if (slice_frames_remaining == 0) audio_now = 128;
 
 #if PIKO_CLOCK_INTERNAL
-  // Stopping fades out rather than cutting; the clock keeps running.
-  if (!piko_internal_clock_playing()) {
-    if (transport_fade_frames == 0) {
-      audio_now = 128;
-    } else {
-      if (audio_tick) --transport_fade_frames;
-      audio_now = (uint8_t)(128 + ((int32_t)audio_now - 128) *
-                                      (int32_t)transport_fade_frames /
-                                      (int32_t)kTransportFadeFrames);
+  // The sample that just left keeps sounding for 8 ms, fading out linearly.
+  if (fade_frames_left > 0) {
+    const int32_t tail = (int32_t)raw_val(fade_sample, fade_phase) - 128;
+    const int32_t mixed =
+        ((int32_t)audio_now - 128) +
+        tail * (int32_t)fade_frames_left / (int32_t)kSampleFadeFrames;
+    audio_now = (uint8_t)(mixed < -128 ? 0
+                                       : (mixed > 127 ? 255 : mixed + 128));
+    if (audio_tick) {
+      const uint32_t tail_len = raw_len(fade_sample);
+      if (fade_direction) {
+        fade_phase = tail_len > 1 && fade_phase + 1u >= tail_len - 1u
+                         ? 0u
+                         : fade_phase + 1u;
+      } else {
+        fade_phase = fade_phase == 0u ? (tail_len > 2 ? tail_len - 2u : 0u)
+                                      : fade_phase - 1u;
+      }
+      --fade_frames_left;
     }
   }
 #endif
@@ -1396,7 +1463,15 @@ void pwm_interrupt_handler() {
     // <dither>
     // audio_now = ditherer.Update(audio_now);
     // </dither>
+#if PIKO_CLOCK_INTERNAL
+  {
+    const int32_t out = 128 + (((int32_t)audio_now - 128) *
+                               (int32_t)mute_gain_q16 / 65536);
+    set_audio_pwm_level((uint8_t)(out < 0 ? 0 : (out > 255 ? 255 : out)));
+  }
+#else
   set_audio_pwm_level(audio_now);
+#endif
 }
 
 void print_buf(const uint8_t *buf, size_t len) {
@@ -1558,15 +1633,20 @@ int main(void) {
 
   // debouncing
   uint16_t debounce_sample = 0;
+#if !PIKO_CLOCK_INTERNAL
   uint32_t debounce_saving = 0;
+#endif
   uint32_t debounce_led_save = 0;
   uint8_t debounce_led_sequencer = 0;
   uint8_t debounce_led_load = 0;
   uint8_t last_button_on = NUM_BUTTONS;
+#if !PIKO_CLOCK_INTERNAL
   bool has_saved = false;
+#endif
   bool do_load = false;
   bool first_time = false;
   bool has_loaded = false;
+#if !PIKO_CLOCK_INTERNAL
   auto save_settings = [&]() {
     save_data[FLASH_PAGE_SIZE - 1] = 0x01;
     save_data[FLASH_PAGE_SIZE - 2] = 0x02;
@@ -1584,6 +1664,7 @@ int main(void) {
     restore_interrupts(ints);
     piko_flash_unlock();
   };
+#endif
 
 #if PIKO_CLOCK_INTERNAL
   // Master clock: start on the selected sample's tempo and keep running.
@@ -1652,6 +1733,10 @@ int main(void) {
       bool ok = true;
       switch (request.type) {
         case PikoRequestType::SetPulsePpqn:
+#if PIKO_CLOCK_INTERNAL
+          // Fixed at 24 PPQN, and nothing writes flash while the clock runs.
+          ok = false;
+#else
           if (!piko::ClockSync::validPulsePpqn(request.value)) {
             ok = false;
           } else {
@@ -1662,8 +1747,12 @@ int main(void) {
             restore_interrupts(interrupts);
             save_settings();
           }
+#endif
           break;
         case PikoRequestType::SetRestartOnStart:
+#if PIKO_CLOCK_INTERNAL
+          ok = false;
+#else
           if (request.value > 1) {
             ok = false;
           } else {
@@ -1676,6 +1765,7 @@ int main(void) {
             restore_interrupts(interrupts);
             save_settings();
           }
+#endif
           break;
         case PikoRequestType::StopPlayback:
           do_stop_everything();
@@ -1695,11 +1785,7 @@ int main(void) {
                                    clock_event_queue.drops(),
                                    piko_usb_midi_queue_drops()});
     }
-#if PIKO_CLOCK_INTERNAL
-    // Writing flash locks both cores, which would stop the clock. Settings
-    // changed while playing stay in RAM; the web app writes the flash copy.
-    debounce_saving = 0;
-#endif
+#if !PIKO_CLOCK_INTERNAL
     // flash works
     if (debounce_saving > 0 && clock_ms > 64000) {
       debounce_saving--;
@@ -1713,6 +1799,7 @@ int main(void) {
 #endif
       }
     }
+#endif
     if (clock_ms == 100) {
       do_load = true;
       first_time = true;
@@ -1720,7 +1807,9 @@ int main(void) {
     if (do_load) {
       do_load = false;
       ledarray_load = 16000;
+#if !PIKO_CLOCK_INTERNAL
       debounce_saving = 0;
+#endif
 #ifdef DEBUG_SAVE
       printf("\n\n\nPICO_FLASH_SIZE_BYTES: \t%d\n", PICO_FLASH_SIZE_BYTES);
       printf("PIKO_SETTINGS_FLASH_OFFSET: \t%d\n", PIKO_SETTINGS_FLASH_OFFSET);
@@ -1848,6 +1937,8 @@ int main(void) {
                             probability_tunnel, save_data);
           }
         }
+#if !PIKO_CLOCK_INTERNAL
+        // The master build has a start/stop button of its own.
         if (input_button[0].ChangedHigh(true) ||
             input_button[3].ChangedHigh(true) ||
             input_button[4].ChangedHigh(true) ||
@@ -1863,6 +1954,7 @@ int main(void) {
             // printf("switching do mute: %d\n", do_mute);
           }
         }
+#endif
 #ifdef DEBUG_BUTTONS
         if (input_button[i].Changed(false)) {
           printf("[%6d] %d: %d", clock_ms, i, input_button[i].On());
@@ -1903,7 +1995,15 @@ int main(void) {
               printf("%d: %d; \n", i, input_knob[i].Value());
 #endif
               if (selector_knob != selector_knob_before) {
+#if PIKO_CLOCK_INTERNAL
+                // Coming back to a selector, the knobs have to catch their
+                // value again before they take control.
+                tempo_knob_captured = false;
+                macro_intensity_captured = false;
+                macro_mode_captured = false;
+#else
                 has_saved = false;
+#endif
                 for (uint8_t j = 1; j < NUM_KNOBS; j++) {
                   input_knob[j].Reset();  // prevent spurious changes when
                                           // changing selection
@@ -2131,7 +2231,7 @@ int main(void) {
                       piko_internal_clock_set_macro_mode(mode);
                     }
                     // Show the mode on the LEDs while the knob moves.
-                    macro_mode_led_debounce = 16000;
+                    macro_mode_led_until_us = time_us_64() + 1000000ull;
                   }
                   break;
 #else
@@ -2163,8 +2263,7 @@ int main(void) {
     }
 
 #if PIKO_CLOCK_INTERNAL
-    if (macro_mode_led_debounce > 0) {
-      macro_mode_led_debounce--;
+    if (time_us_64() < macro_mode_led_until_us) {
       ledarray.Clear();
       ledarray.Set((macro_mode_selected - 1u) % NUM_LEDS, 950);
     } else

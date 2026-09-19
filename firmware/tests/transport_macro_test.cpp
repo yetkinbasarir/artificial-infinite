@@ -8,6 +8,7 @@
 #include "Transport.h"
 
 using piko::euclideanHit;
+using piko::kMacroDeadZone;
 using piko::kMacroOne;
 using piko::kNudgeLimitTicks;
 using piko::kTicksPerBar;
@@ -185,7 +186,7 @@ void testMacroDeadZone() {
   macro.reset();
   assert(!macro.active());
   for (uint32_t i = 0; i < 16; ++i) {
-    const piko::MacroStep& step = macro.step(i);
+    const piko::MacroStep step = macro.resolveStep(i);
     assert(step.play && step.gate_percent == 100 && !step.jump && !step.reverse && !step.roll);
   }
 
@@ -204,30 +205,25 @@ void testMacroModesDoWhatTheySay() {
   macro.applyPendingMode();
   macro.setIntensity(kMacroOne);
   macro.beginPeriod(1);
+  macro.beginBar();
   uint32_t playing = 0;
   for (uint32_t i = 0; i < 8; ++i) {
-    const piko::MacroStep& step = macro.step(i);
+    const piko::MacroStep step = macro.resolveStep(i);
     if (step.play) playing++;
     assert(step.gate_percent == 25);
   }
   assert(playing == 2);
-
-  macro.setIntensity(kMacroOne / 4u);
-  macro.beginPeriod(2);
-  playing = 0;
-  for (uint32_t i = 0; i < 8; ++i) playing += macro.step(i).play ? 1 : 0;
-  assert(playing == 8);  // below 0.3 nothing is dropped
-  assert(macro.step(0).gate_percent < 100);
 
   // Shuffle: jumps, but every step still plays.
   macro.setMode(static_cast<uint8_t>(MacroMode::Shuffle));
   macro.applyPendingMode();
   macro.setIntensity(kMacroOne);
   macro.beginPeriod(3);
+  macro.beginBar();
   uint32_t jumps = 0;
   for (uint32_t i = 0; i < macro.patternSteps(); ++i) {
-    assert(macro.step(i).play);
-    jumps += macro.step(i).jump ? 1 : 0;
+    assert(macro.resolveStep(i).play);
+    jumps += macro.resolveStep(i).jump ? 1 : 0;
   }
   assert(jumps > 0);
 
@@ -236,12 +232,13 @@ void testMacroModesDoWhatTheySay() {
   macro.applyPendingMode();
   macro.setIntensity(kMacroOne);
   macro.beginPeriod(4);
+  macro.beginBar();
   uint32_t rolls = 0;
   for (uint32_t i = 0; i < macro.patternSteps(); ++i) {
-    if (macro.step(i).roll) {
+    if (macro.resolveStep(i).roll) {
       rolls++;
       assert(i % 8 >= 4);  // in the second half of the bar
-      assert(macro.step(i).roll_division == 32);
+      assert(macro.resolveStep(i).roll_division == 32);
     }
   }
   assert(rolls > 0);
@@ -251,11 +248,12 @@ void testMacroModesDoWhatTheySay() {
   macro.applyPendingMode();
   macro.setIntensity(kMacroOne / 3u);
   macro.beginPeriod(5);
+  macro.beginBar();
   uint32_t reverses = 0;
   uint32_t jumps_low = 0;
   for (uint32_t i = 0; i < macro.patternSteps(); ++i) {
-    reverses += macro.step(i).reverse ? 1 : 0;
-    jumps_low += macro.step(i).jump ? 1 : 0;
+    reverses += macro.resolveStep(i).reverse ? 1 : 0;
+    jumps_low += macro.resolveStep(i).jump ? 1 : 0;
   }
   assert(reverses > 0);
   assert(jumps_low == 0);
@@ -265,11 +263,36 @@ void testMacroModesDoWhatTheySay() {
   macro.applyPendingMode();
   macro.setIntensity(kMacroOne);
   macro.beginPeriod(6);
+  macro.beginBar();
   uint32_t abstract_jumps = 0;
   for (uint32_t i = 0; i < macro.patternSteps(); ++i) {
-    abstract_jumps += macro.step(i).jump ? 1 : 0;
+    abstract_jumps += macro.resolveStep(i).jump ? 1 : 0;
   }
   assert(abstract_jumps > 0);
+}
+
+// The euclidean count is taken from the intensity at each bar line.
+void testEuclideanCountFollowsTheBar() {
+  MacroEngine macro;
+  macro.setMode(static_cast<uint8_t>(MacroMode::Thin));
+  macro.applyPendingMode();
+  macro.setIntensity(kMacroOne);
+  macro.beginPeriod(1);
+  macro.beginBar();
+  uint32_t playing = 0;
+  for (uint32_t i = 0; i < 8; ++i) playing += macro.resolveStep(i).play ? 1 : 0;
+  assert(playing == 2);
+
+  // Turned down, but the bar has not turned over yet.
+  macro.setIntensity(kMacroOne / 4u);
+  playing = 0;
+  for (uint32_t i = 0; i < 8; ++i) playing += macro.resolveStep(i).play ? 1 : 0;
+  assert(playing == 2);
+
+  macro.beginBar();
+  playing = 0;
+  for (uint32_t i = 0; i < 8; ++i) playing += macro.resolveStep(i).play ? 1 : 0;
+  assert(playing == 8);
 }
 
 void testMacroPeriodLadderAndRepeatability() {
@@ -286,44 +309,64 @@ void testMacroPeriodLadderAndRepeatability() {
   macro.setIntensity(kMacroOne);
   assert(macro.periodTicks() == kTicksPerQuarter);
 
-  // The same period draws the same pattern; the next one differs.
+  // The same period draws the same dice; the next one differs.
   macro.setMode(static_cast<uint8_t>(MacroMode::Shuffle));
   macro.applyPendingMode();
   macro.setIntensity(kMacroOne / 2u);
   macro.beginPeriod(7);
+  macro.beginBar();
   std::vector<bool> first;
-  for (uint32_t i = 0; i < macro.patternSteps(); ++i) first.push_back(macro.step(i).jump);
+  for (uint32_t i = 0; i < macro.patternSteps(); ++i) first.push_back(macro.resolveStep(i).jump);
   macro.beginPeriod(8);
   std::vector<bool> second;
-  for (uint32_t i = 0; i < macro.patternSteps(); ++i) second.push_back(macro.step(i).jump);
+  for (uint32_t i = 0; i < macro.patternSteps(); ++i) second.push_back(macro.resolveStep(i).jump);
   macro.beginPeriod(7);
   std::vector<bool> again;
-  for (uint32_t i = 0; i < macro.patternSteps(); ++i) again.push_back(macro.step(i).jump);
+  for (uint32_t i = 0; i < macro.patternSteps(); ++i) again.push_back(macro.resolveStep(i).jump);
   assert(first == again);
   assert(first != second);
 }
 
 void testMacroModeWaitsForTheBar() {
-  MacroEngine macro;
-  macro.setMode(static_cast<uint8_t>(MacroMode::Thin));
-  macro.applyPendingMode();
+  MacroEngine macro;  // starts on mode 1
   macro.setMode(static_cast<uint8_t>(MacroMode::Roll));
   assert(macro.mode() == static_cast<uint8_t>(MacroMode::Thin));
   assert(macro.pendingMode() == static_cast<uint8_t>(MacroMode::Roll));
-  macro.applyPendingMode();
+  assert(macro.applyPendingMode());  // the bar line takes it
   assert(macro.mode() == static_cast<uint8_t>(MacroMode::Roll));
+  assert(!macro.applyPendingMode());  // and only once
 }
 
-void testPreparedPatternIsUsed() {
+// Turning the intensity knob is heard on the next step, not the next period.
+void testIntensityIsReadAtTheStep() {
   MacroEngine macro;
   macro.setMode(static_cast<uint8_t>(MacroMode::Shuffle));
   macro.applyPendingMode();
-  macro.setIntensity(kMacroOne / 2u);
-  macro.beginPeriod(10);
-  macro.prepareNextPeriod(11);
-  assert(macro.takePrepared(11));
-  assert(!macro.takePrepared(11));  // only once
+  macro.setIntensity(kMacroOne);
+  macro.beginPeriod(3);
+  macro.beginBar();
+  uint32_t jumps_high = 0;
+  for (uint32_t i = 0; i < macro.patternSteps(); ++i) {
+    jumps_high += macro.resolveStep(i).jump ? 1 : 0;
+  }
+  assert(jumps_high > 0);
+
+  // Same period, same dice: only the intensity moved.
+  macro.setIntensity(kMacroDeadZone + 1u);
+  uint32_t jumps_low = 0;
+  for (uint32_t i = 0; i < macro.patternSteps(); ++i) {
+    jumps_low += macro.resolveStep(i).jump ? 1 : 0;
+  }
+  assert(jumps_low < jumps_high);
+
+  // Back to zero and the macro is out of the way at once.
+  macro.setIntensity(0);
+  for (uint32_t i = 0; i < macro.patternSteps(); ++i) {
+    const piko::MacroStep step = macro.resolveStep(i);
+    assert(step.play && !step.jump && step.gate_percent == 100);
+  }
 }
+
 
 }  // namespace
 
@@ -339,9 +382,10 @@ int main() {
   testEuclidean();
   testMacroDeadZone();
   testMacroModesDoWhatTheySay();
+  testEuclideanCountFollowsTheBar();
   testMacroPeriodLadderAndRepeatability();
   testMacroModeWaitsForTheBar();
-  testPreparedPatternIsUsed();
+  testIntensityIsReadAtTheStep();
   puts("transport_macro_test: all tests passed");
   return 0;
 }

@@ -19,6 +19,7 @@ export interface BankSample {
   // Where the BPM came from, and whether that choice wants a listen.
   bpmSource?: 'name' | 'analysis' | 'length' | 'onsets' | 'range';
   bpmFlagged?: boolean;
+  bpmFolded?: boolean;
   // The file this sample was decoded from, kept for the named-copies zip.
   file?: File;
   beats: number;

@@ -6,6 +6,7 @@ import {
   bpmCandidates,
   countOnsets,
   octaveDistance,
+  foldBpmIntoRange,
   spectralFluxEnvelope,
   tempoAgrees,
 } from './bpm';
@@ -80,6 +81,30 @@ describe('candidate maths', () => {
     // Just inside and just outside the 4 % window.
     expect(tempoAgrees(176.8, 90)).toBe(true);
     expect(tempoAgrees(150, 90)).toBe(false);
+  });
+});
+
+describe('folding into the playable range', () => {
+  it('doubles what is too slow and halves what is too fast', () => {
+    expect(foldBpmIntoRange(35)).toEqual({ bpm: 70, folded: true });
+    expect(foldBpmIntoRange(19)).toEqual({ bpm: 76, folded: true });
+    expect(foldBpmIntoRange(320)).toEqual({ bpm: 160, folded: true });
+    expect(foldBpmIntoRange(700)).toEqual({ bpm: 175, folded: true });
+  });
+
+  it('leaves a playable tempo alone', () => {
+    expect(foldBpmIntoRange(170)).toEqual({ bpm: 170, folded: false });
+    expect(foldBpmIntoRange(40)).toEqual({ bpm: 40, folded: false });
+    expect(foldBpmIntoRange(300)).toEqual({ bpm: 300, folded: false });
+  });
+
+  it('folds a named tempo and says so', () => {
+    const [result] = analyzeSampleBpm([
+      { id: 'a', name: '35 bpm Slow.wav', mono: new Float32Array(24000), sampleRate: 24000 },
+    ]);
+    expect(result.bpm).toBeCloseTo(70, 5);
+    expect(result.source).toBe('name');
+    expect(result.folded).toBe(true);
   });
 });
 

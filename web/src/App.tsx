@@ -19,7 +19,7 @@ import 'driver.js/dist/driver.css';
 import { Estimation } from 'arrival-time';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { decodeAndEncodeFile, inferBpmFromName, makePreviewBuffer, pcmToMono } from './audio';
-import { analyzeSampleBpm, bpmSourceLabel } from './bpm';
+import { analyzeSampleBpm, bpmSourceLabel, foldBpmIntoRange } from './bpm';
 import { buildZip, namedCopyFilename } from './zip';
 import {
   BANK_MAX_SAMPLES,
@@ -534,6 +534,7 @@ export function App() {
         sample.beats = analysis.beats;
         sample.bpmSource = analysis.source;
         sample.bpmFlagged = analysis.flagged;
+        sample.bpmFolded = analysis.folded;
       }
 
       setSamples((current) => sortSamplesForSlots([...current, ...next].slice(0, BANK_MAX_SAMPLES)));
@@ -1238,7 +1239,11 @@ function SampleRow({
               }}
               onBlur={() => {
                 setBpmEditing(false);
-                setBpmText(formatBpm(sample.bpm));
+                const folded = foldTypedBpm(sample.bpm);
+                if (folded.bpm !== sample.bpm || folded.folded !== (sample.bpmFolded ?? false)) {
+                  onUpdate({ bpm: folded.bpm, bpmFolded: folded.folded });
+                }
+                setBpmText(formatBpm(folded.bpm));
                 onCommitBpm();
               }}
             />
@@ -1257,6 +1262,7 @@ function SampleRow({
           {sample.bpmSource ? (
             <span className={sample.bpmFlagged ? 'bpm-source flagged' : 'bpm-source'}>
               {bpmSourceLabel(sample.bpmSource)}
+              {sample.bpmFolded ? ' · folded' : ''}
               {sample.bpmFlagged ? ' ⚠' : ''}
             </span>
           ) : null}
@@ -1445,6 +1451,12 @@ function parseBpm(text: string): number {
   if (!Number.isFinite(value) || value <= 0) return 0;
   // The field holds centi-BPM in the bank, so keep two decimals.
   return Math.round(value * 100) / 100;
+}
+
+// A hand-typed tempo is folded into the playable range as well.
+function foldTypedBpm(bpm: number): { bpm: number; folded: boolean } {
+  const folded = foldBpmIntoRange(bpm);
+  return { bpm: Math.round(folded.bpm * 100) / 100, folded: folded.folded };
 }
 
 function pulseDivisionLabel(ppqn: PulsePpqn): string {

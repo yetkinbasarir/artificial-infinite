@@ -187,6 +187,16 @@ external flag.
   board boots stopped and silent on slot 1, GPIO 21 is a start/stop button on
   that build, stopping fades out over 5 ms, and no MIDI transport message is
   sent at all — the port carries `0xF8` and nothing else.
+- Master refinements: the slice index follows the player's musical position
+  rather than a trigger count; a sample change keeps the new attack and fades
+  the old read head over 8 ms instead of crossfading heads; every mute and
+  unmute (transport, serial `S`/`B`, bank writes) shares one 5 ms ramp; the
+  macro decides each step against the live intensity, latching the euclidean
+  count per bar and redrawing on a mode change or a start; `save_settings()`
+  and the code that only serves it are compiled out of the master build, so
+  the only runtime flash writes left are the loader's bank commands; the macro
+  LED is timed from `time_us_64`; and the loader folds a BPM outside 40–300
+  into range, marking the row.
 - Loader tempo analysis: `web/src/bpm.ts` analyses a dropped batch together
   (spectral flux onset envelope over a hand-written radix-2 FFT, autocorrelation
   with a log-normal tempo prior, octave settled by length matches within the

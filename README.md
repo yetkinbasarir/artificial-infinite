@@ -36,9 +36,16 @@ The web loader and the published UF2 use the master build.
 - The board wakes up **stopped and silent**, on the sample in slot 1 whatever
   was saved last, at that sample's tempo.
 - **Start/stop: the button on GPIO 21** (pull-up, falling edge, 30 ms
-  debounce). Starting plays from the first step on the next tick and clears
-  the macro counters and the nudge; stopping fades the output out over 5 ms.
-  The clock and its MIDI keep running either way.
+  debounce). Starting plays from the first step on the next tick, redraws the
+  macro pattern and clears its counters and the nudge. Every way of going
+  quiet — the transport, the serial stop command, a bank write — rides the
+  same 5 ms fade, and so does coming back. The clock and its MIDI keep running
+  either way. There is no mute button combination on this build.
+- A new sample enters at full level on the bar line with its attack intact;
+  the sample it replaced keeps sounding for 8 ms and fades out.
+- The slice number comes from the player's musical position, so a nudge
+  carries the sequence along with it. Jumps, tunnel and the macro are applied
+  on top of that.
 - The tempo comes from the selected sample's BPM. Selecting another sample
   glides to its tempo while playing, and simply takes it while stopped.
 - Tempo can be taken over by the tempo knob (selector 1, knob B): absolute
@@ -51,12 +58,17 @@ The web loader and the published UF2 use the master build.
 One knob of intensity (knob A) and one of mode (knob B) drive every variation
 the board makes on its own. The first 3 % of the intensity knob is off. Both
 knobs pick up rather than jump, and the macro keeps its setting when the
-selector moves away. A new mode waits for the next bar line; while the mode
-knob moves, the LED of the mode number lights for a second.
+selector moves away. A new mode waits for the next bar line and redraws the
+pattern there; while the mode knob moves, the LED of the mode number lights
+for a second.
 
-The pattern is redrawn at the start of each variation period from a generator
-seeded by the period counter and the mode, so a period always sounds the same
-and the next one does not. Periods are 8, 4, 2 or 1 bars, or 2 beats or
+Each variation period draws the dice, not the decisions: every step gets its
+random values up front, seeded by the period counter and the mode, so a period
+always sounds the same and the next one does not. Whether a roll becomes a
+jump, a reversal or a dropped step is decided at the step itself against the
+intensity of that moment, so **turning the knob is heard on the next step**.
+The euclidean step count is taken from the intensity at each bar line, and the
+period length from the intensity when the period starts. Periods are 8, 4, 2 or 1 bars, or 2 beats or
 1 beat; more intensity means a shorter period.
 
 | Mode | What it does | Period |
@@ -212,6 +224,10 @@ Samples are placed in slots slowest first by centi-BPM, ties by name; editing a
 BPM and leaving the field re-sorts them. **Download named copies** hands back
 the files you added as a zip with `_119.23bpm` appended to each name (files
 that already state their BPM are left alone).
+
+A tempo below 40 BPM is doubled, and one above 300 BPM halved, until it is
+inside the range the firmware plays; such a row says "folded" next to where
+its BPM came from. A tempo typed in by hand is folded the same way.
 
 If no BPM can be found the field is left empty and the bank cannot be uploaded
 until it is filled in; every row's BPM is editable to two decimals.

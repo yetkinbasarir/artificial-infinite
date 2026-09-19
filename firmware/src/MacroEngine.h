@@ -7,14 +7,19 @@
 namespace piko {
 
 // One knob of intensity and one of mode drive every variation the player makes
-// on its own. The pattern is redrawn at the start of each variation period
-// from a generator seeded by the period counter and the mode, so the same
-// period always sounds the same and neighbouring periods do not.
+// on its own.
+//
+// A period draws the randomness, not the decisions: each step gets its dice
+// rolls and a jump target up front, seeded by the period counter and the mode,
+// so a period always sounds the same. Whether a roll turns into a jump, a
+// reversal or a dropped step is decided at the step itself against the
+// intensity of that moment, so turning the knob is heard on the next step.
 static constexpr uint32_t kMacroMaxSteps = 64;
 static constexpr uint8_t kMacroModes = 5;
 static constexpr uint16_t kMacroOne = 65535u;
 // The first 3 % of the intensity knob is off: the macro touches nothing.
 static constexpr uint16_t kMacroDeadZone = (kMacroOne * 3u) / 100u;
+static constexpr uint32_t kMacroStepsPerBar = kTicksPerBar / kTicksPerStep;
 
 enum class MacroMode : uint8_t {
   Thin = 1,     // shorter gates, fewer steps
@@ -34,6 +39,13 @@ struct MacroStep {
   uint8_t roll_division = 16;  // 16th or 32nd note retriggers
 };
 
+// The dice for one step, drawn once per period.
+struct MacroSlot {
+  uint16_t first = 0;
+  uint16_t second = 0;
+  uint8_t jump_slice = 0;
+};
+
 class MacroEngine {
  public:
   void reset();
@@ -42,43 +54,35 @@ class MacroEngine {
   uint16_t intensity() const { return intensity_; }
   bool active() const { return intensity_ > kMacroDeadZone; }
 
-  // A new mode waits for the next bar line.
+  // A new mode waits for the next bar line, and redraws the pattern there.
   void setMode(uint8_t mode);
-  void applyPendingMode();
+  bool applyPendingMode();  // true when the mode actually changed
   uint8_t mode() const { return mode_; }
   uint8_t pendingMode() const { return pending_mode_; }
 
   // Variation period for the current mode and intensity.
   uint32_t periodTicks() const;
 
-  // Draws the pattern for `period_index`. Call once per period.
+  // Draws the dice for a period. Cheap enough for the tick interrupt.
   void beginPeriod(uint32_t period_index);
-  // Draws the pattern the next period will use, so nothing is generated in
-  // the tick interrupt.
-  void prepareNextPeriod(uint32_t period_index);
-  bool takePrepared(uint32_t period_index);
+  // Latches the euclidean step count from the intensity of this bar.
+  void beginBar();
 
-  const MacroStep& step(uint32_t step_index) const;
-  uint32_t patternSteps() const { return pattern_steps_; }
+  // What the macro does to the step at this musical position.
+  MacroStep resolveStep(uint32_t step_index) const;
+  uint32_t patternSteps() const { return length_; }
+  uint32_t barSteps() const { return bar_keep_; }
 
  private:
-  struct Pattern {
-    MacroStep steps[kMacroMaxSteps];
-    uint32_t length = 8;
-    uint32_t period_index = 0;
-    bool valid = false;
-  };
-
-  void generate(Pattern& pattern, uint32_t period_index) const;
-
   uint16_t intensity_ = 0;
   uint8_t mode_ = 1;
   uint8_t pending_mode_ = 1;
 
-  Pattern pattern_{};
-  Pattern prepared_{};
-  uint32_t pattern_steps_ = 8;
-  MacroStep neutral_{};
+  MacroSlot slots_[kMacroMaxSteps]{};
+  uint32_t length_ = kMacroStepsPerBar;
+  uint32_t rotation_ = 0;
+  uint32_t period_index_ = 0;
+  uint32_t bar_keep_ = kMacroStepsPerBar;
 };
 
 // Even spread of `pulses` over `steps`, rotated. Used for step thinning.
