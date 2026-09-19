@@ -12,6 +12,7 @@ export interface DeviceInfo {
   sampleCount: number;
   pulsePpqn?: PulsePpqn;
   restartOnStart?: boolean;
+  clockSource?: 'INTERNAL' | 'EXTERNAL';
   clockSyncVersion?: number;
   protocolVersion?: number;
   bankVersion?: number;
@@ -501,6 +502,7 @@ export function parseInfo(text: string): DeviceInfo {
     usedBytes: Number(token(['USED', 'U'], '0')),
     sampleRate: Number(token(['RATE', 'SR'], '24000')),
     sampleCount: Number(token(['COUNT', 'N'], '0')),
+    clockSource: parseClockSource(token('CLOCK_SOURCE', '')),
     pulsePpqn: parsePulsePpqn(numberToken('PULSE_PPQN')),
     restartOnStart: parseRestartOnStart(numberToken('RESTART_ON_START')),
     clockSyncVersion: numberToken('CLOCK_SYNC_VERSION'),
@@ -514,6 +516,17 @@ export function parseInfo(text: string): DeviceInfo {
 
 function parsePulsePpqn(value: number | undefined): PulsePpqn | undefined {
   return PULSE_PPQN_VALUES.includes(value as PulsePpqn) ? (value as PulsePpqn) : undefined;
+}
+
+function parseClockSource(value: string): 'INTERNAL' | 'EXTERNAL' | undefined {
+  if (value === 'INTERNAL' || value === 'EXTERNAL') return value;
+  return undefined;
+}
+
+// The master build generates its own clock, so the follower settings do not
+// apply to it.
+export function hasExternalClockSettings(info: DeviceInfo | null): boolean {
+  return hasClockSync(info) && info?.clockSource !== 'INTERNAL';
 }
 
 function parseRestartOnStart(value: number | undefined): boolean | undefined {

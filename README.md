@@ -17,15 +17,69 @@ rebuilt external clock system; see [UPSTREAM.md](UPSTREAM.md) for details.
 | `0x080000`  | 12 KB     | Sample bank header (v2, up to 128 samples)                      |
 | `0x083000`  | ~1.56 MB  | Audio: 1,560,576 bytes ≈ 65 s of 8-bit audio at 24 kHz          |
 
-## External clock
+## Clock
 
-Artificial Infinite has no internal tempo: it follows an external analog pulse
-clock, so several boards fed from the same clock stay aligned.
+Two builds come out of one source tree, chosen with the `CLOCK_SOURCE` flag:
+
+| Build | UF2 | Clock |
+| ----- | --- | ----- |
+| `CLOCK_SOURCE_INTERNAL` (default) | `artificial-infinite-2mb.uf2` | Master: the board makes its own 24 PPQN clock and sends MIDI clock out |
+| `CLOCK_SOURCE_EXTERNAL` | `artificial-infinite-2mb-external.uf2` | Follower: analog clock in on GPIO 22, reset in on GPIO 21 |
+
+The web loader and the published UF2 use the master build.
+
+### Master (default)
+
+- The clock starts at boot and never stops; playback runs continuously.
+- 24 PPQN, 4/4, so a bar is 96 ticks. One beat is an eighth note.
+- The tempo comes from the selected sample's BPM. Selecting another sample
+  glides to its tempo (see below).
+- Tempo can be taken over by the tempo knob (selector 7, knob B): absolute
+  40–300 BPM. The knob does nothing until its position matches the running
+  tempo, so a sample change never snaps the tempo to wherever the pot sits.
+  Catching the tempo during a glide cancels that glide.
+- **No setting is written to flash while the board plays**, because a flash
+  write stops both cores and would break the clock. Settings changed with the
+  knobs live until power-off; the web loader writes the stored copy.
+
+#### Sample change glide
+
+A newly selected sample enters on the next bar line, and the tempo glide
+starts on the same tick:
+
+- `tempo(k) = T0 × (T1 / T0) ^ smootherstep(k / N)`, with
+  `smootherstep(t) = 6t⁵ − 15t⁴ + 10t³`.
+- `N` is 192 ticks (2 bars) unless the largest per-tick step,
+  `|ln(T1 / T0)| × 1.875 / N`, exceeds 0.0025; then it is 384 ticks (4 bars),
+  which is the longest glide there is.
+- The glide lands exactly on the target tempo at tick `N`.
+- Playback speed is interpolated between ticks, once per audio block, so it
+  slides instead of stepping.
+- Selecting another sample mid-glide starts a new glide from the tempo of the
+  moment, again on the next bar line. A sample whose BPM already matches does
+  not glide at all.
+- Tunnel jumps never change the tempo: the jumped-to sample is varispeeded to
+  the running tempo instead.
+
+### MIDI out
+
+31 250 baud 8N1 on **GPIO 22**, driven by PIO (the hardware UART TX pins are
+taken by the LEDs and the knobs) at 12 mA. Only MIDI clock leaves the port:
+one `0xFA` right before the first `0xF8`, then one `0xF8` per tick. Nothing
+else is sent, and a byte is never allowed to delay a tick.
+
+TRS Type A wiring:
+
+| TRS  | MIDI DIN | Connection            |
+| ---- | -------- | --------------------- |
+| Tip  | pin 5    | GPIO 22 through 10 Ω  |
+| Ring | pin 4    | 3V3 through 33 Ω      |
+| Sleeve | pin 2  | GND                   |
+
+### Follower (`CLOCK_SOURCE_EXTERNAL`)
 
 - **Clock in: GPIO 22.** Internal pull-up, falling edge.
 - **Reset in: GPIO 21.** Internal pull-up, falling edge.
-- **GPIO 23** is driven permanently high (SMPS PWM mode), so the WS2812 output
-  is disabled. There is no trigger output.
 
 Both inputs expect an inverting NPN stage, one per jack:
 
@@ -41,30 +95,19 @@ collector --- 1k --- GPIO (22 = clock, 21 = reset)
 
 A rising edge at the jack is therefore a falling edge at the GPIO. Pulses
 shorter than 300 µs apart are ignored, as are resets within 50 ms of each
-other.
+other. Beats are eighth notes produced at the moment the marking pulse
+arrives; the tempo estimate follows the incoming pulses, clamped to
+30–300 BPM. When the clock stops, the slice in flight finishes and the beat
+LED goes dark. **Restart from step 1 when the clock starts** (on by default)
+makes the first pulse after a stop play the first beat again. A pulse on the
+reset input restarts the pattern from the first beat: within 5 ms of a clock
+pulse it belongs to that pulse and acts at once, otherwise it waits for the
+next pulse. Divisions of 1, 2, 4, 8, 12, 24 and 48 PPQN are selectable in the
+web loader (default 24, which matches the 1010music Blackbox analog clock
+output). MIDI clock in is not supported.
 
-### Behaviour
-
-- One beat is an eighth note, produced at the moment the marking pulse
-  arrives. Nothing is predicted or snapped to a grid.
-- The tempo estimate follows the incoming pulses and drives sample playback,
-  clamped to 30–300 BPM.
-- When the clock stops, the slice in flight finishes its own length and the
-  beat LED goes dark. The position is kept.
-- **Restart from step 1 when the clock starts** (on by default, switchable in
-  the web loader) makes the first pulse after a stop play the first beat again.
-  Turn it off to continue from where the clock stopped.
-- A pulse on the reset input restarts the pattern from the first beat. A reset
-  within 5 ms of a clock pulse belongs to that pulse and acts immediately;
-  otherwise it waits for the next pulse, including while the clock is stopped.
-
-### Pulse divisions
-
-1, 2, 4, 8, 12, 24 and 48 PPQN, set in the web loader; the default is 24 PPQN.
-That matches the 1010music Blackbox analog clock output. 2 PPQN suits the
-Korg SQ-1 and Volca series, and Arturia BeatStep Pro or Moog DFAM clock
-outputs work at whichever division they are set to. MIDI clock is not
-supported: the clock input is analog only.
+GPIO 23 is driven permanently high (SMPS PWM mode) in both builds, so the
+WS2812 output is disabled. There is no trigger output.
 
 ## Controls
 
@@ -79,7 +122,7 @@ row says.
 | 4        | Jump probability                | Retrigger probability       |
 | 5        | Tunnel probability              | Reverse probability         |
 | 6        | Sequencer record                | Sequencer play              |
-| 7        | Save settings                   | Load settings               |
+| 7        | Save settings (follower only)   | **Tempo** (master) / Load settings (follower) |
 | 8        | **Volume**                      | — (free)                    |
 
 **DJ filter (selector 2, knob A).** One pot sweeps a 4th-order Linkwitz-Riley
@@ -96,6 +139,15 @@ pot, unity at the top. There is no distortion stage.
 - `firmware/`: Pico firmware (C/C++, pico-sdk 2.1.1)
 - `web/`: browser loader for firmware and samples (Vite + React)
 - `.github/workflows/`: firmware CI and GitHub Pages deploy
+
+## Sample BPM
+
+Every sample needs a BPM, because the master build takes its tempo from it.
+The loader reads it from the file name (`120bpm`, `bpm120`, `128 BPM`,
+`87.5bpm`, case-insensitive) and otherwise estimates it by dividing the length
+into 4, 8, 16 and 32 beats and taking the first tempo between 80 and 180 BPM.
+If neither works the BPM field is left empty and the bank cannot be uploaded
+until it is filled in; every row's BPM is editable.
 
 ## Build the firmware
 

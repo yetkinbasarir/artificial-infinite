@@ -3,6 +3,7 @@ import { BANK_HEADER_SIZE, BANK_MAX_SAMPLES, BANK_VERSION } from './bank';
 import {
   PULSE_PPQN_VALUES,
   hasClockSync,
+  hasExternalClockSettings,
   isCompatibleFirmware,
   parseClockDiagnostics,
   parseInfo,
@@ -34,6 +35,21 @@ describe('serial metadata parsing', () => {
     expect(info.pulsePpqn).toBe(24);
     expect(info.restartOnStart).toBe(true);
     expect(hasClockSync(info)).toBe(true);
+  });
+
+  it('reports the clock source and hides follower settings on the master build', () => {
+    const master = parseInfo(
+      `${baseInfo} CLOCK_SYNC_VERSION 2 CLOCK_SOURCE INTERNAL PULSE_PPQN 24 RESTART_ON_START 1\nEND\n`,
+    );
+    expect(master.clockSource).toBe('INTERNAL');
+    expect(hasClockSync(master)).toBe(true);
+    expect(hasExternalClockSettings(master)).toBe(false);
+
+    const follower = parseInfo(
+      `${baseInfo} CLOCK_SYNC_VERSION 2 CLOCK_SOURCE EXTERNAL PULSE_PPQN 24 RESTART_ON_START 1\nEND\n`,
+    );
+    expect(follower.clockSource).toBe('EXTERNAL');
+    expect(hasExternalClockSettings(follower)).toBe(true);
   });
 
   it('parses a disabled restart-on-start setting', () => {

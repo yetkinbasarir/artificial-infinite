@@ -17,7 +17,9 @@
 #include "tusb.h"
 
 #include "PikoAudioBank.h"
+#include "ClockSource.h"
 #include "ClockSync.h"
+#include "InternalClock.h"
 #include "PikoProbabilities.h"
 #include "PikoRuntime.h"
 #include "PikoSampleManager.h"
@@ -50,8 +52,12 @@
 #ifdef PICO_DEFAULT_LED_PIN
 #define LED_PIN PICO_DEFAULT_LED_PIN
 #endif
+#if PIKO_CLOCK_INTERNAL
+// GPIO 22 carries MIDI clock out instead of an analog clock in.
+#else
 #define CLOCK_PIN 22  // analog clock in pin (inverted input stage)
 #define RESET_PIN 21  // reset in pin (inverted input stage)
+#endif
 #define MAIN_LOOP_DELAY 50
 
 #if WS2812_ENABLED == 1
@@ -201,12 +207,27 @@ Sequencer sequencer;
 // clock input
 volatile uint8_t pulse_ppqn = 24;
 volatile bool restart_on_start = true;
+volatile uint32_t clock_rejected_edges = 0;
 
+#if !PIKO_CLOCK_INTERNAL
 // Glitch filtering lives in the capture ISR. 300 us is well under the shortest
 // legal spacing (2083 us at 48 PPQN / 300 BPM); resets debounce far slower.
 static constexpr uint32_t kClockGlitchUs = 300u;
 static constexpr uint32_t kResetGlitchUs = 50000u;
-volatile uint32_t clock_rejected_edges = 0;
+#endif
+
+#if PIKO_CLOCK_INTERNAL
+// Tempo knob (selector 7 / knob B) stays inert until its position matches the
+// running tempo, so a sample change never jumps to wherever the pot sits.
+static constexpr uint32_t kTempoKnobMinX100 = 4000u;
+static constexpr uint32_t kTempoKnobMaxX100 = 30000u;
+static constexpr uint32_t kTempoPickupWindowX100 = 200u;
+bool tempo_knob_captured = false;
+uint32_t tempo_knob_smoothed_x100 = 0;
+// Playback follows the interpolated tempo once per audio block.
+static constexpr uint32_t kTempoBlockFrames = 64u;
+uint32_t tempo_block_counter = 0;
+#endif
 
 piko::ClockSync clock_sync;
 SpscQueue<piko::ClockEvent, 32> clock_event_queue;
@@ -252,9 +273,14 @@ void param_set_break(uint16_t knob_val, uint8_t &probability_jump_,
 }
 
 void update_playback_rate() {
+#if PIKO_CLOCK_INTERNAL
+  // The master tempo drives playback: rate = tempo / the sample's own tempo.
+  uint32_t bpm_x100 = piko_internal_clock_tempo_now_x100();
+#else
   // Until the external clock has been measured, play the sample at its own
   // recorded tempo; the following pulses correct it.
   uint32_t bpm_x100 = clock_sync.targetBpmX100();
+#endif
   if (bpm_x100 == 0) {
     bpm_x100 = static_cast<uint32_t>(sample_source_bpm) * 100u;
   }
@@ -598,6 +624,21 @@ void restart_loop_from_beginning() {
   btn_reset = true;
 }
 
+#if PIKO_CLOCK_INTERNAL
+// The internal tick feeds exactly the path a captured clock edge would.
+void __not_in_flash_func(piko_internal_clock_on_tick)(uint32_t timestamp_us) {
+  clock_event_queue.push({piko::ClockEventType::Pulse, timestamp_us});
+}
+
+void configure_clock_capture() {
+  const uint32_t interrupts = save_and_disable_interrupts();
+  clock_event_queue.clear();
+  clock_sync.setPulsePpqn(pulse_ppqn);
+  clock_sync.setRestartOnStart(restart_on_start);
+  update_playback_rate();
+  restore_interrupts(interrupts);
+}
+#else
 void clock_gpio_irq_handler(uint gpio, uint32_t events) {
   if ((events & GPIO_IRQ_EDGE_FALL) == 0) return;
   // The external input stage inverts: a rising edge on the jack is a falling
@@ -635,6 +676,8 @@ void configure_clock_capture() {
   restore_interrupts(interrupts);
 }
 
+#endif  // PIKO_CLOCK_INTERNAL
+
 bool service_clock_transport(uint32_t& now_us) {
   piko::ClockEvent event{};
   bool had_pulse = false;
@@ -648,10 +691,14 @@ bool service_clock_transport(uint32_t& now_us) {
       restart_loop_from_beginning();
     }
   }
+#if PIKO_CLOCK_INTERNAL
+  (void)had_pulse;
+#else
   // Every accepted pulse refreshes the tempo estimate the sample rate follows.
   if (had_pulse) {
     update_playback_rate();
   }
+#endif
   return clock_sync.advanceCarrier(now_us);
 }
 
@@ -907,6 +954,14 @@ void pwm_interrupt_handler() {
   const bool audio_tick = playback_phase_q32 >= (1ull << 32u);
   if (audio_tick) playback_phase_q32 -= 1ull << 32u;
   if (audio_tick && slice_frames_remaining > 0) --slice_frames_remaining;
+#if PIKO_CLOCK_INTERNAL
+  // One audio block per playback-rate update: the rate slides between ticks
+  // instead of stepping on them.
+  if (audio_tick && ++tempo_block_counter >= kTempoBlockFrames) {
+    tempo_block_counter = 0;
+    update_playback_rate();
+  }
+#endif
   if (!audio_tick && !beat_onset) {
     set_audio_pwm_level(audio_now);
     return;
@@ -947,9 +1002,16 @@ void pwm_interrupt_handler() {
         } else {
           sample_add = 0;
         }
+#if PIKO_CLOCK_INTERNAL
+        // A newly selected sample waits for the bar line the glide starts on.
+        if (piko_internal_clock_consume_sample_swap()) {
+          sample_set = sample_change;
+        }
+#else
         if (sample_set != sample_change) {
           sample_set = sample_change;
         }
+#endif
         sample = (sample_set + sample_add) % piko_audio_sample_count();
         refresh_sample_timing(sample);
         restart_slice_window();
@@ -1317,6 +1379,7 @@ int main(void) {
   // setup gpio pins
   gpio_init(LED_PIN);
   gpio_set_dir(LED_PIN, GPIO_OUT);
+#if !PIKO_CLOCK_INTERNAL
   // Both inputs sit behind an inverting NPN stage and idle high.
   gpio_init(CLOCK_PIN);
   gpio_set_dir(CLOCK_PIN, GPIO_IN);
@@ -1324,6 +1387,7 @@ int main(void) {
   gpio_init(RESET_PIN);
   gpio_set_dir(RESET_PIN, GPIO_IN);
   gpio_pull_up(RESET_PIN);
+#endif
   // Hold the SMPS in PWM mode for a quieter rail.
   gpio_init(23);
   gpio_set_dir(23, GPIO_OUT);
@@ -1400,6 +1464,11 @@ int main(void) {
     piko_flash_unlock();
   };
 
+#if PIKO_CLOCK_INTERNAL
+  // Master clock: start on the selected sample's tempo and keep running.
+  configure_clock_capture();
+  piko_internal_clock_init(static_cast<uint32_t>(sample_source_bpm) * 100u);
+#else
   // initialize clock and reset capture
   gpio_set_irq_enabled_with_callback(CLOCK_PIN, GPIO_IRQ_EDGE_FALL, true,
                                      clock_gpio_irq_handler);
@@ -1407,6 +1476,7 @@ int main(void) {
   irq_set_priority(IO_IRQ_BANK0, 0x00);
   irq_set_enabled(IO_IRQ_BANK0, true);
   configure_clock_capture();
+#endif
 
 // LED
 #if WS2812_ENABLED == 1
@@ -1446,6 +1516,11 @@ int main(void) {
       ledStrip.fill(WS2812::RGB(knob_a_led, 0, knob_b_led));
       ledStrip.show();
     }
+#endif
+
+#if PIKO_CLOCK_INTERNAL
+    // Keep one tick planned ahead of the clock interrupt.
+    piko_internal_clock_service();
 #endif
 
     if (debounce_sample > 0) {
@@ -1499,6 +1574,11 @@ int main(void) {
                                    clock_event_queue.drops(),
                                    piko_usb_midi_queue_drops()});
     }
+#if PIKO_CLOCK_INTERNAL
+    // Writing flash locks both cores, which would stop the clock. Settings
+    // changed while playing stay in RAM; the web app writes the flash copy.
+    debounce_saving = 0;
+#endif
     // flash works
     if (debounce_saving > 0 && clock_ms > 64000) {
       debounce_saving--;
@@ -1692,6 +1772,15 @@ int main(void) {
                     }
                     debounce_sample = 500;
                     save_data[SAVE_SAMPLE] = sample_change;
+#if PIKO_CLOCK_INTERNAL
+                    // The new sample sets the tempo from the next bar line.
+                    piko_internal_clock_request_sample_tempo(
+                        static_cast<uint32_t>(
+                            piko_audio_sample(sample_change).source_bpm) *
+                        100u);
+                    tempo_knob_captured = false;
+                    tempo_knob_smoothed_x100 = 0;
+#endif
                   }
                   break;
                 case 1:
@@ -1742,6 +1831,10 @@ int main(void) {
                   }
                   break;
                 case 6:
+#if PIKO_CLOCK_INTERNAL
+                  // No runtime flash writes while the clock is running.
+                  break;
+#else
                   // save
                   if (input_knob[i].Value() > 2040) {
                     if (!has_saved) {
@@ -1753,6 +1846,7 @@ int main(void) {
                     has_saved = false;
                   }
                   break;
+#endif
                 case 7:
                   // volume
                   param_set_volume(input_knob[i].Value(), volume_gain);
@@ -1822,6 +1916,42 @@ int main(void) {
                   }
                   break;
                 case 6:
+#if PIKO_CLOCK_INTERNAL
+                  {
+                    // Tempo knob: absolute 40..300 BPM, inert until its
+                    // position catches the running tempo.
+                    const uint32_t knob_tempo_x100 =
+                        kTempoKnobMinX100 +
+                        (uint32_t)((uint64_t)input_knob[i].Value() *
+                                   (kTempoKnobMaxX100 - kTempoKnobMinX100) /
+                                   input_knob[i].ValueMax());
+                    const uint32_t running_x100 =
+                        piko_internal_clock_tempo_x100();
+                    if (!tempo_knob_captured) {
+                      const uint32_t distance =
+                          knob_tempo_x100 > running_x100
+                              ? knob_tempo_x100 - running_x100
+                              : running_x100 - knob_tempo_x100;
+                      if (distance <= kTempoPickupWindowX100) {
+                        tempo_knob_captured = true;
+                        tempo_knob_smoothed_x100 = running_x100;
+                      }
+                    }
+                    if (tempo_knob_captured) {
+                      if (tempo_knob_smoothed_x100 == 0) {
+                        tempo_knob_smoothed_x100 = knob_tempo_x100;
+                      }
+                      // One-pole smoothing keeps the tempo continuous.
+                      tempo_knob_smoothed_x100 +=
+                          ((int32_t)knob_tempo_x100 -
+                           (int32_t)tempo_knob_smoothed_x100) /
+                          4;
+                      piko_internal_clock_set_knob_tempo(
+                          tempo_knob_smoothed_x100);
+                    }
+                  }
+                  break;
+#else
                   // load
                   if (input_knob[i].Value() > 4000) {
                     if (!has_loaded) {
@@ -1834,6 +1964,7 @@ int main(void) {
                   }
 
                   break;
+#endif
                 case 7:
                   // free slot (was internal tempo)
                   break;

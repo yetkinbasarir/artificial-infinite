@@ -28,6 +28,8 @@ set(PIKOCODE_SOURCES
 	${CMAKE_CURRENT_LIST_DIR}/src/PikoAudioBank.cpp
 	${CMAKE_CURRENT_LIST_DIR}/src/PikoRuntime.cpp
 	${CMAKE_CURRENT_LIST_DIR}/src/PikoSampleManager.cpp
+	${CMAKE_CURRENT_LIST_DIR}/src/TempoEngine.cpp
+	${CMAKE_CURRENT_LIST_DIR}/src/InternalClock.cpp
 	${CMAKE_CURRENT_LIST_DIR}/doth/WS2812.cpp 
 	${CMAKE_CURRENT_LIST_DIR}/doth/usb_descriptors.c
 )
@@ -36,11 +38,14 @@ set(PIKOCODE_SOURCES
 pico_define_boot_stage2(slower_boot2 ${PICO_DEFAULT_BOOT_STAGE2_FILE})
 target_compile_definitions(slower_boot2 PRIVATE PICO_FLASH_SPI_CLKDIV=4)
 
-function(add_pikocore_firmware TARGET_NAME OUTPUT_BASENAME FLASH_SIZE_BYTES)
+# CLOCK_SOURCE picks the master (internal tick + MIDI clock out) or the
+# follower (Phase 1 external clock in) build.
+function(add_pikocore_firmware TARGET_NAME OUTPUT_BASENAME FLASH_SIZE_BYTES CLOCK_SOURCE_VALUE)
 	add_executable(${TARGET_NAME} ${PIKOCODE_SOURCES})
 	pico_set_boot_stage2(${TARGET_NAME} slower_boot2)
 	set_target_properties(${TARGET_NAME} PROPERTIES OUTPUT_NAME "${OUTPUT_BASENAME}")
 	pico_generate_pio_header(${TARGET_NAME} ${CMAKE_CURRENT_LIST_DIR}/doth/WS2812.pio)
+	pico_generate_pio_header(${TARGET_NAME} ${CMAKE_CURRENT_LIST_DIR}/doth/uart_tx.pio)
 
 	target_link_libraries(${TARGET_NAME}
 		pico_stdlib
@@ -73,6 +78,7 @@ function(add_pikocore_firmware TARGET_NAME OUTPUT_BASENAME FLASH_SIZE_BYTES)
 	unset(PIKOCODE_TARGET)
 
 	target_compile_definitions(${TARGET_NAME} PRIVATE
+		CLOCK_SOURCE=${CLOCK_SOURCE_VALUE}
 		PICO_FLASH_SIZE_BYTES=${FLASH_SIZE_BYTES}u
 		PIKO_FIRMWARE_RESERVE=524288u
 		PICO_STDIO_USB_CONNECTION_WITHOUT_DTR=1
@@ -92,4 +98,8 @@ function(add_pikocore_firmware TARGET_NAME OUTPUT_BASENAME FLASH_SIZE_BYTES)
 	)
 endfunction()
 
-add_pikocore_firmware(artificial_infinite "artificial-infinite-2mb" 2097152)
+add_pikocore_firmware(artificial_infinite "artificial-infinite-2mb" 2097152
+	CLOCK_SOURCE_INTERNAL)
+
+add_pikocore_firmware(artificial_infinite_external
+	"artificial-infinite-2mb-external" 2097152 CLOCK_SOURCE_EXTERNAL)

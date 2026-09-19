@@ -36,6 +36,7 @@ import {
   PikocoreSerial,
   PulsePpqn,
   hasClockSync,
+  hasExternalClockSettings,
   isCompatibleFirmware,
   shouldPollClockDiagnostics,
 } from './serial';
@@ -177,7 +178,15 @@ export function App() {
   const showStatusSpinner = busy && status.kind === 'idle';
   const bankEditingDisabled = !connected || busy || incompatibleDevice != null;
   const uploadNeedsSync = connected && incompatibleDevice == null && bankDirty;
-  const uploadDisabled = !connected || incompatibleDevice != null || busy || overCapacity || (!uploadNeedsSync && samples.length === 0);
+  // A sample with no BPM cannot be uploaded: the firmware needs it for tempo.
+  const samplesMissingBpm = samples.filter((sample) => !(sample.bpm > 0)).length;
+  const uploadDisabled =
+    !connected ||
+    incompatibleDevice != null ||
+    busy ||
+    overCapacity ||
+    samplesMissingBpm > 0 ||
+    (!uploadNeedsSync && samples.length === 0);
   const selectedFirmware = firmwareOptions[0];
   const firmwareDownloadUrl = `${import.meta.env.BASE_URL}${selectedFirmware.file}`;
   const uploadTransferText =
@@ -894,7 +903,7 @@ export function App() {
         </div>
         <div className="toolbar-subrow">
           <div className="clock-mode">
-            {hasClockSync(device) ? (
+            {hasExternalClockSettings(device) ? (
               <>
                 <label className={!connected || incompatibleDevice != null || busy ? 'disabled' : ''}>
                   Pulse division
@@ -953,6 +962,16 @@ export function App() {
             <p>Waiting for clock data…</p>
           )}
         </details>
+      ) : null}
+
+      {samplesMissingBpm > 0 ? (
+        <section className="firmware-warning" role="alert">
+          <strong>BPM missing</strong>
+          <p>
+            {samplesMissingBpm === 1 ? 'One sample has no BPM' : `${samplesMissingBpm} samples have no BPM`}. The firmware
+            needs each sample's tempo, so enter it in the BPM field before uploading.
+          </p>
+        </section>
       ) : null}
 
       {incompatibleDevice ? (
@@ -1098,15 +1117,16 @@ function SampleRow({
           onChange={(event) => onUpdate({ name: event.target.value })}
         />
         <div className="sample-stats">
-          <label>
+          <label title={sample.bpm > 0 ? 'Sample tempo' : 'No BPM found: enter one before uploading'}>
             BPM
             <input
-              className="bpm"
+              className={sample.bpm > 0 ? 'bpm' : 'bpm missing'}
               type="number"
               min={1}
               max={65535}
-              value={sample.bpm}
-              onChange={(event) => onUpdate({ bpm: Number(event.target.value) || 1 })}
+              placeholder="?"
+              value={sample.bpm > 0 ? sample.bpm : ''}
+              onChange={(event) => onUpdate({ bpm: Number(event.target.value) || 0 })}
             />
           </label>
           <label>

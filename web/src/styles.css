@@ -766,3 +766,8 @@
   }
 
 }
+
+.app input.bpm.missing {
+  border-color: var(--bad, #c0392b);
+  outline: 1px solid var(--bad, #c0392b);
+}

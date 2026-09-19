@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ClockSource.h"
 #include "PikoAudioBank.h"
 #include "PikoRuntime.h"
 #include "hardware/flash.h"
@@ -187,7 +188,7 @@ void handle_info() {
   char info[512];
   uint32_t used = 0;
   int n = snprintf(info + used, sizeof(info) - used,
-                   "PIKO1 FW 2.4 F %lu R %lu S %lu A %lu C %lu U %lu SR %lu N %lu PROTO 1 BANK_VERSION %lu BANK_HEADER_SIZE %lu BANK_MAX_SAMPLES %lu CLOCK_SYNC_VERSION 2 PULSE_PPQN %u RESTART_ON_START %u\nEND\n",
+                   "PIKO1 FW 2.4 F %lu R %lu S %lu A %lu C %lu U %lu SR %lu N %lu PROTO 1 BANK_VERSION %lu BANK_HEADER_SIZE %lu BANK_MAX_SAMPLES %lu CLOCK_SYNC_VERSION 2 CLOCK_SOURCE %s PULSE_PPQN %u RESTART_ON_START %u\nEND\n",
                    static_cast<unsigned long>(piko_flash_total_bytes()),
                    static_cast<unsigned long>(PIKO_FIRMWARE_RESERVE),
                    static_cast<unsigned long>(piko_settings_flash_offset()),
@@ -199,7 +200,7 @@ void handle_info() {
                    static_cast<unsigned long>(PIKO_BANK_VERSION),
                    static_cast<unsigned long>(PIKO_BANK_HEADER_SIZE),
                    static_cast<unsigned long>(PIKO_BANK_MAX_SAMPLES),
-                   piko_pulse_ppqn(),
+                   PIKO_CLOCK_SOURCE_NAME, piko_pulse_ppqn(),
                    piko_restart_on_start() ? 1u : 0u);
   if (n < 0 || static_cast<uint32_t>(n) >= sizeof(info) - used) {
     return;
@@ -345,6 +346,14 @@ void handle_write() {
 
 void handle_restart_on_start() {
   const int value = read_byte_timeout(kWriteTimeoutMs);
+#if PIKO_CLOCK_INTERNAL
+  // The master build has no start/stop to align to, and writing the setting
+  // would mean writing flash while the clock runs.
+  (void)value;
+  write_str("ERR\n");
+  flush_serial();
+  return;
+#else
   if (value == PICO_ERROR_TIMEOUT || (value != 0 && value != 1)) {
     write_str("ERR\n");
     flush_serial();
@@ -357,10 +366,18 @@ void handle_restart_on_start() {
   }
   write_str("OK\n");
   flush_serial();
+#endif
 }
 
 void handle_pulse_ppqn() {
   const int value = read_byte_timeout(kWriteTimeoutMs);
+#if PIKO_CLOCK_INTERNAL
+  // The master build is fixed at 24 PPQN.
+  (void)value;
+  write_str("ERR\n");
+  flush_serial();
+  return;
+#else
   if (value == PICO_ERROR_TIMEOUT ||
       !piko::ClockSync::validPulsePpqn(static_cast<uint8_t>(value))) {
     write_str("ERR\n");
@@ -374,6 +391,7 @@ void handle_pulse_ppqn() {
   }
   write_str("OK\n");
   flush_serial();
+#endif
 }
 
 void handle_clock_diagnostics() {

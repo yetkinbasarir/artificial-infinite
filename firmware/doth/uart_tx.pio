@@ -1,0 +1,13 @@
+; 8N1 UART transmitter, one bit every 8 PIO cycles.
+; Same shape as the uart_tx example that ships with pico-examples
+; (Raspberry Pi, BSD-3-Clause): side-set and OUT both drive the TX pin, so the
+; line idles high, drops for the start bit and returns high for the stop bit.
+
+.program uart_tx
+.side_set 1 opt
+
+    pull       side 1 [7]  ; stop bit / idle high while waiting for a byte
+    set x, 7   side 0 [7]  ; start bit, and preload the bit counter
+bitloop:
+    out pins, 1            ; shift out one data bit, LSB first
+    jmp x-- bitloop   [6]  ; eight cycles per bit

@@ -40,9 +40,11 @@ jobs:
         working-directory: firmware
         run: make justbuild
 
-      - name: Upload UF2
+      - name: Upload UF2s
         uses: actions/upload-artifact@v7.0.1
         with:
           name: artificial-infinite-2mb
-          path: firmware/build/artificial-infinite-2mb.uf2
+          path: |
+            firmware/build/artificial-infinite-2mb.uf2
+            firmware/build/artificial-infinite-2mb-external.uf2
           if-no-files-found: error

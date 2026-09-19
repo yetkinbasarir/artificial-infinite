@@ -8,6 +8,7 @@ export PICO_SDK_PATH
 
 JOBS ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 FIRMWARE_UF2 := build/artificial-infinite-2mb.uf2
+FIRMWARE_EXTERNAL_UF2 := build/artificial-infinite-2mb-external.uf2
 WEB_PUBLIC_DIR := ../web/public
 WEB_UF2 := $(WEB_PUBLIC_DIR)/artificial-infinite-2mb.uf2
 
@@ -23,7 +24,7 @@ publish-web-uf2:
 	du -sh $(WEB_UF2)
 
 justbuild: quick
-	du -sh $(FIRMWARE_UF2)
+	du -sh $(FIRMWARE_UF2) $(FIRMWARE_EXTERNAL_UF2)
 
 doth/easing.h: doth/generate_easing.py doth/easings/*.txt
 	cd doth && python3 generate_easing.py > easing.h

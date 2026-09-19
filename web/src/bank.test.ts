@@ -87,15 +87,35 @@ describe('pikocore bank format', () => {
 });
 
 describe('BPM detection', () => {
-  it('prefers filename bpm', () => {
+  it('reads every common filename spelling', () => {
     expect(inferBpmFromName('break_bpm170.wav')).toBe(170);
+    expect(inferBpmFromName('break_120bpm.wav')).toBe(120);
+    expect(inferBpmFromName('Loop 128 BPM.wav')).toBe(128);
+    expect(inferBpmFromName('house-124bpm-loop.aif')).toBe(124);
+    expect(inferBpmFromName('halftime_87.5bpm.wav')).toBe(87.5);
+    expect(inferBpmFromName('BPM_95_kit.wav')).toBe(95);
+  });
+
+  it('returns null when the name carries no bpm', () => {
+    expect(inferBpmFromName('amen_break.wav')).toBeNull();
+    expect(inferBpmFromName('take 3.wav')).toBeNull();
   });
 
   it('prefers filename beats', () => {
     expect(inferBeatsFromName('amen_beats16_bpm170.wav')).toBe(16);
   });
 
-  it('estimates loop bpm from duration', () => {
-    expect(estimateBpmFromFrames(526629)).toBe(175);
+  it('estimates bpm from duration, first count that lands in range', () => {
+    // 21.94 s: 4, 8 and 16 beats are all too slow, 32 beats gives 87.5 BPM.
+    expect(estimateBpmFromFrames(526629)).toBeCloseTo(87.5, 3);
+    // 2 s: 4 beats is already 120 BPM.
+    expect(estimateBpmFromFrames(48000)).toBeCloseTo(120, 6);
+  });
+
+  it('gives up when no division lands in range', () => {
+    // 0.2 s: even 4 beats would be 1200 BPM.
+    expect(estimateBpmFromFrames(4800)).toBeNull();
+    // 60 s: 32 beats is still only 32 BPM.
+    expect(estimateBpmFromFrames(24000 * 60)).toBeNull();
   });
 });

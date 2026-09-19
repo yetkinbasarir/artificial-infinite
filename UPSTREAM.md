@@ -149,6 +149,36 @@ Tests: `firmware/tests/dsp_test.cpp` covers the filter (bit-exact bypass,
 low-pass and high-pass extremes, a full pot sweep without output steps, the
 retrigger sweep), the sequencer cap and the probability round trip.
 
+## Master clock build
+
+The board is now a master by default: `src/ClockSource.h` selects
+`CLOCK_SOURCE_INTERNAL` (default) or `CLOCK_SOURCE_EXTERNAL`, and CMake builds
+both UF2s. None of the Phase 1 follower code was deleted; it lives behind the
+external flag.
+
+- `src/TempoEngine.{h,cpp}`: tempo as Q16 BPM, the smootherstep glide, the
+  2-bar/4-bar length rule, and per-tick periods with the sub-microsecond
+  remainder carried into the next tick.
+- `src/InternalClock.{h,cpp}`: a hardware alarm produces 24 PPQN ticks that
+  feed the same beat path a captured clock edge does. The tick interrupt only
+  reads a prepared period, re-arms the alarm and pushes a MIDI byte; the main
+  loop does the tempo and period arithmetic. Both the interrupt and the sender
+  are `__not_in_flash_func`.
+- `doth/uart_tx.pio`: MIDI out at 31 250 baud on GPIO 22 (every hardware UART
+  TX pin is taken by LEDs or knobs), 12 mA drive. One `0xFA` before the first
+  `0xF8`, then one `0xF8` per tick, written without blocking.
+- Tempo follows the selected sample; tunnel jumps varispeed to the running
+  tempo instead of changing it. The tempo knob returns on selector 7 / knob B
+  with pickup, and takes over from a glide.
+- The master build performs no flash writes while playing: the knob save,
+  the auto-save timer and the `P`/`T` commands are disabled there, so the
+  clock is never stopped by a flash erase.
+- `INFO` gains `CLOCK_SOURCE`; the web loader hides the pulse-division and
+  restart settings when it reads `INTERNAL`.
+- Web loader: BPM is read from the file name or estimated from the length
+  (4/8/16/32 beats, 80–180 BPM), shown per row as an editable field, and a
+  bank with a missing BPM cannot be uploaded.
+
 ## Pulling changes from upstream
 
 Paths differ from upstream (most files live under `firmware/`), so
