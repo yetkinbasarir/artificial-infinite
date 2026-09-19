@@ -217,7 +217,7 @@ static constexpr uint32_t kResetGlitchUs = 50000u;
 #endif
 
 #if PIKO_CLOCK_INTERNAL
-// Tempo knob (selector 7 / knob B) stays inert until its position matches the
+// Tempo knob (selector 1 / knob B) stays inert until its position matches the
 // running tempo, so a sample change never jumps to wherever the pot sits.
 static constexpr uint32_t kTempoKnobMinX100 = 4000u;
 static constexpr uint32_t kTempoKnobMaxX100 = 30000u;
@@ -227,6 +227,28 @@ uint32_t tempo_knob_smoothed_x100 = 0;
 // Playback follows the interpolated tempo once per audio block.
 static constexpr uint32_t kTempoBlockFrames = 64u;
 uint32_t tempo_block_counter = 0;
+
+// Macro knobs (selector 7). Both pick up rather than jump, and the macro keeps
+// its state when the selector moves away.
+static constexpr uint16_t kMacroPickupWindow = 200u;   // of 4095
+static constexpr uint16_t kMacroModeHysteresis = 82u;  // 2 % of 4095
+bool macro_intensity_captured = false;
+uint16_t macro_intensity_smoothed = 0;
+bool macro_mode_captured = false;
+uint16_t macro_mode_smoothed = 0;
+uint8_t macro_mode_selected = 1;
+uint32_t macro_mode_led_debounce = 0;
+
+// Stopping fades the output over five milliseconds instead of cutting it.
+static constexpr uint32_t kTransportFadeFrames = 120u;  // 5 ms at 24 kHz
+uint32_t transport_fade_frames = 0;
+
+// Nudge buttons (selector 1) shift the player, they do not trigger slices.
+static const int8_t kNudgeTicks[NUM_BUTTONS] = {1, 6, 12, 24, -24, -12, -6, -1};
+static constexpr uint16_t kNudgeRepeatDelay = 100u;   // 400 ms at 250 Hz
+static constexpr uint16_t kNudgeRepeatPeriod = 37u;   // 150 ms at 250 Hz
+uint16_t nudge_hold[NUM_BUTTONS] = {0, 0, 0, 0, 0, 0, 0, 0};
+bool nudge_mode = false;
 #endif
 
 piko::ClockSync clock_sync;
@@ -319,6 +341,40 @@ uint8_t apply_volume_gain(uint8_t sample) {
   const int32_t centred = (int32_t)sample - 128;
   return (uint8_t)(((centred * (int32_t)volume_gain) >> 8) + 128);
 }
+
+#if PIKO_CLOCK_INTERNAL
+// A knob only takes control once its position matches the value it would set,
+// so switching selectors never jumps a parameter.
+bool knob_pickup(bool &captured, uint16_t &smoothed, uint16_t knob,
+                 uint16_t current, uint16_t window) {
+  if (!captured) {
+    const uint16_t distance = knob > current ? knob - current : current - knob;
+    if (distance > window) return false;
+    captured = true;
+    smoothed = current;
+  }
+  smoothed = (uint16_t)((int32_t)smoothed +
+                        ((int32_t)knob - (int32_t)smoothed) / 4);
+  return true;
+}
+
+// Five equal zones with a 2 % dead band either side of each boundary.
+uint8_t macro_mode_from_knob(uint16_t value, uint8_t current) {
+  const uint16_t width = (kKnobMax + 1u) / 5u;
+  uint8_t zone = (uint8_t)(value / width);
+  if (zone > 4) zone = 4;
+  const uint8_t held = current >= 1 && current <= 5 ? current - 1u : 0u;
+  if (zone == held) return current;
+  if (zone > held) {
+    const uint16_t boundary = (uint16_t)((held + 1u) * width);
+    if (value < boundary + kMacroModeHysteresis) return current;
+  } else {
+    const uint16_t boundary = (uint16_t)(held * width);
+    if (value + kMacroModeHysteresis > boundary) return current;
+  }
+  return (uint8_t)(zone + 1u);
+}
+#endif
 
 // Position the DJ filter runs at: the smoothed pot, pushed further into the
 // low-pass half while a retrigger sweep is active.
@@ -699,7 +755,21 @@ bool service_clock_transport(uint32_t& now_us) {
     update_playback_rate();
   }
 #endif
+#if PIKO_CLOCK_INTERNAL
+  // The player's steps come from the transport, which the nudge can shift; the
+  // clock itself keeps running underneath.
+  if (piko_internal_clock_consume_restart()) {
+    restart_loop_from_beginning();
+    transport_fade_frames = 0;
+  }
+  if (piko_internal_clock_consume_stop()) {
+    transport_fade_frames = kTransportFadeFrames;
+  }
+  (void)clock_sync.advanceCarrier(now_us);
+  return piko_internal_clock_consume_step();
+#else
   return clock_sync.advanceCarrier(now_us);
+#endif
 }
 
 /*
@@ -805,7 +875,11 @@ void pwm_interrupt_handler() {
           retrig_count = retrig_max;
         }
       }
-    } else if (do_mute_debounce == 0) {
+    } else if (do_mute_debounce == 0
+#if PIKO_CLOCK_INTERNAL
+               && !nudge_mode
+#endif
+    ) {
       for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
         if (input_button[i].On()) {
           if (button_on >= NUM_BUTTONS) {
@@ -1020,6 +1094,12 @@ void pwm_interrupt_handler() {
         // Position always comes from the global beat counter, so boards fed
         // the same clock and reset land on the same slice.
         select_beat = beat_num_total % sample_beats;
+#if PIKO_CLOCK_INTERNAL
+        const piko::MacroStep macro_step = piko_internal_clock_macro_step();
+        if (macro_step.jump && sample_beats > 1) {
+          select_beat = macro_step.jump_slice % sample_beats;
+        }
+#endif
         if (flag_half_time) {
           select_beat++;
           if (select_beat % 2 > 0)
@@ -1092,6 +1172,30 @@ void pwm_interrupt_handler() {
         phase_sample[phase_head] =
             select_beat * (sample_frames_per_slice << flag_half_time);
 
+#if PIKO_CLOCK_INTERNAL
+        // The macro shapes the step: gate length, dropped steps, reversals and
+        // end-of-bar rolls.
+        if (!macro_step.play) {
+          slice_frames_remaining = 0;
+        } else if (macro_step.gate_percent < 100) {
+          slice_frames_remaining =
+              (uint32_t)((uint64_t)slice_frames_remaining *
+                         macro_step.gate_percent / 100u);
+          if (slice_frames_remaining == 0) slice_frames_remaining = 1;
+        }
+        if (macro_step.roll && !fx_retrig) {
+          fx_retrig = true;
+          btn_retrig = true;
+          retrig_count = 0;
+          retrig_sel = macro_step.roll_division >= 32 ? 14 : 11;
+          retrig_max = macro_step.roll_division >= 32 ? 8 : 4;
+          retrig_filter = 0;
+          retrig_volume_reduce = 0;
+          playback_phase_q32 = (1ull << 32u) - playback_effective_increment_q32;
+          phase_retrig = (retrig_len(retrig_sel) << flag_half_time) - 1;
+        }
+#endif
+
         // random direction for the new head
         if (probability_direction > 0) {
           uint8_t r1 = randint(0, 255);
@@ -1107,6 +1211,9 @@ void pwm_interrupt_handler() {
         } else {
           direction[phase_head] = base_direction;
         }
+#if PIKO_CLOCK_INTERNAL
+        if (macro_step.reverse) direction[phase_head] = 1 - base_direction;
+#endif
       } else {
         // update the sample
         noise_gate_val++;
@@ -1236,6 +1343,20 @@ void pwm_interrupt_handler() {
 
   // The slice has run its length and the next beat has not arrived yet.
   if (slice_frames_remaining == 0) audio_now = 128;
+
+#if PIKO_CLOCK_INTERNAL
+  // Stopping fades out rather than cutting; the clock keeps running.
+  if (!piko_internal_clock_playing()) {
+    if (transport_fade_frames == 0) {
+      audio_now = 128;
+    } else {
+      if (audio_tick) --transport_fade_frames;
+      audio_now = (uint8_t)(128 + ((int32_t)audio_now - 128) *
+                                      (int32_t)transport_fade_frames /
+                                      (int32_t)kTransportFadeFrames);
+    }
+  }
+#endif
 
   // <envelope> noise gate and the retrigger volume shape
   const uint8_t envelope_shift = retrig_volume_reduce + noise_gate_fade;
@@ -1623,7 +1744,12 @@ int main(void) {
         volume_gain = (uint16_t)(save_data[SAVE_VOLUME] << 8) +
                       save_data[SAVE_VOLUME + 1];
         if (volume_gain > VOLUME_GAIN_UNITY) volume_gain = VOLUME_GAIN_UNITY;
+#if PIKO_CLOCK_INTERNAL
+        // The master build always wakes up on the first slot.
+        sample_change = 0;
+#else
         sample_change = save_data[SAVE_SAMPLE];
+#endif
         if (piko_audio_sample_count() > 0) {
           sample_change %= piko_audio_sample_count();
           sample = sample_change;
@@ -1666,8 +1792,46 @@ int main(void) {
     }
 
     if (clock_ms % 16 == 0) {  // 250 Hz
+#if PIKO_CLOCK_INTERNAL
+      // On selector 1 the buttons nudge the player instead of firing slices.
+      nudge_mode = selector_knob == 0;
+      if (nudge_mode) {
+        for (uint8_t i = 0; i < NUM_BUTTONS; i++) input_button[i].Read();
+        const bool clear_combo =
+            input_button[3].On() && input_button[4].On();
+        if (clear_combo) {
+          if (input_button[3].ChangedHigh(true) ||
+              input_button[4].ChangedHigh(true)) {
+            piko_internal_clock_clear_nudge();
+          }
+          for (uint8_t i = 0; i < NUM_BUTTONS; i++) nudge_hold[i] = 0;
+        } else {
+          for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+            if (!input_button[i].On()) {
+              nudge_hold[i] = 0;
+              continue;
+            }
+            if (input_button[i].ChangedHigh(true)) {
+              piko_internal_clock_nudge(kNudgeTicks[i]);
+              nudge_hold[i] = 1;
+              continue;
+            }
+            // Only the single-tick buttons repeat while held.
+            if (nudge_hold[i] == 0 || (i != 0 && i != NUM_BUTTONS - 1)) continue;
+            nudge_hold[i]++;
+            if (nudge_hold[i] > kNudgeRepeatDelay &&
+                (nudge_hold[i] - kNudgeRepeatDelay) % kNudgeRepeatPeriod == 0) {
+              piko_internal_clock_nudge(kNudgeTicks[i]);
+            }
+          }
+        }
+      }
+#endif
       // read gpio inputs
       for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+#if PIKO_CLOCK_INTERNAL
+        if (nudge_mode) break;
+#endif
         input_button[i].Read();
         // if (input_button[i].ChangedHigh(false)) {
         //   MidiOut_on(midiout, midi_notes[(i % 8)], 127);
@@ -1830,7 +1994,15 @@ int main(void) {
                   break;
                 case 6:
 #if PIKO_CLOCK_INTERNAL
-                  // No runtime flash writes while the clock is running.
+                  // Macro intensity.
+                  if (knob_pickup(macro_intensity_captured,
+                                  macro_intensity_smoothed,
+                                  input_knob[i].Value(),
+                                  macro_intensity_smoothed,
+                                  kMacroPickupWindow)) {
+                    piko_internal_clock_set_macro_intensity((uint16_t)(
+                        (uint32_t)macro_intensity_smoothed * 65535u / kKnobMax));
+                  }
                   break;
 #else
                   // save
@@ -1867,11 +2039,44 @@ int main(void) {
 
               switch (selector_knob) {
                 case 0:
+#if PIKO_CLOCK_INTERNAL
+                  {
+                    // Tempo knob: absolute 40..300 BPM, inert until its
+                    // position catches the running tempo.
+                    const uint32_t knob_tempo_x100 =
+                        kTempoKnobMinX100 +
+                        (uint32_t)((uint64_t)input_knob[i].Value() *
+                                   (kTempoKnobMaxX100 - kTempoKnobMinX100) /
+                                   input_knob[i].ValueMax());
+                    const uint32_t running_x100 =
+                        piko_internal_clock_tempo_x100();
+                    if (!tempo_knob_captured) {
+                      const uint32_t distance =
+                          knob_tempo_x100 > running_x100
+                              ? knob_tempo_x100 - running_x100
+                              : running_x100 - knob_tempo_x100;
+                      if (distance <= kTempoPickupWindowX100) {
+                        tempo_knob_captured = true;
+                        tempo_knob_smoothed_x100 = running_x100;
+                      }
+                    }
+                    if (tempo_knob_captured) {
+                      tempo_knob_smoothed_x100 +=
+                          ((int32_t)knob_tempo_x100 -
+                           (int32_t)tempo_knob_smoothed_x100) /
+                          4;
+                      piko_internal_clock_set_knob_tempo(
+                          tempo_knob_smoothed_x100);
+                    }
+                  }
+                  break;
+#else
                   param_set_break(input_knob[i].Value(), probability_jump,
                                   probability_retrig, probability_gate,
                                   probability_direction, probability_tunnel,
                                   save_data);
                   break;
+#endif
                 case 1:
                   // stretch
                   set_timestretch_knob(input_knob[i].Value());
@@ -1915,38 +2120,18 @@ int main(void) {
                   break;
                 case 6:
 #if PIKO_CLOCK_INTERNAL
-                  {
-                    // Tempo knob: absolute 40..300 BPM, inert until its
-                    // position catches the running tempo.
-                    const uint32_t knob_tempo_x100 =
-                        kTempoKnobMinX100 +
-                        (uint32_t)((uint64_t)input_knob[i].Value() *
-                                   (kTempoKnobMaxX100 - kTempoKnobMinX100) /
-                                   input_knob[i].ValueMax());
-                    const uint32_t running_x100 =
-                        piko_internal_clock_tempo_x100();
-                    if (!tempo_knob_captured) {
-                      const uint32_t distance =
-                          knob_tempo_x100 > running_x100
-                              ? knob_tempo_x100 - running_x100
-                              : running_x100 - knob_tempo_x100;
-                      if (distance <= kTempoPickupWindowX100) {
-                        tempo_knob_captured = true;
-                        tempo_knob_smoothed_x100 = running_x100;
-                      }
+                  // Macro mode, taking effect on the next bar line.
+                  if (knob_pickup(macro_mode_captured, macro_mode_smoothed,
+                                  input_knob[i].Value(), macro_mode_smoothed,
+                                  kMacroPickupWindow)) {
+                    const uint8_t mode = macro_mode_from_knob(
+                        macro_mode_smoothed, macro_mode_selected);
+                    if (mode != macro_mode_selected) {
+                      macro_mode_selected = mode;
+                      piko_internal_clock_set_macro_mode(mode);
                     }
-                    if (tempo_knob_captured) {
-                      if (tempo_knob_smoothed_x100 == 0) {
-                        tempo_knob_smoothed_x100 = knob_tempo_x100;
-                      }
-                      // One-pole smoothing keeps the tempo continuous.
-                      tempo_knob_smoothed_x100 +=
-                          ((int32_t)knob_tempo_x100 -
-                           (int32_t)tempo_knob_smoothed_x100) /
-                          4;
-                      piko_internal_clock_set_knob_tempo(
-                          tempo_knob_smoothed_x100);
-                    }
+                    // Show the mode on the LEDs while the knob moves.
+                    macro_mode_led_debounce = 16000;
                   }
                   break;
 #else
@@ -1977,6 +2162,13 @@ int main(void) {
       // adc reading end
     }
 
+#if PIKO_CLOCK_INTERNAL
+    if (macro_mode_led_debounce > 0) {
+      macro_mode_led_debounce--;
+      ledarray.Clear();
+      ledarray.Set((macro_mode_selected - 1u) % NUM_LEDS, 950);
+    } else
+#endif
     if (sequencer.IsRecording()) {
       ledarray.Clear();
       if (sequencer.Last() < 255) {

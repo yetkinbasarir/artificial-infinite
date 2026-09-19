@@ -8,19 +8,19 @@ namespace piko {
 static constexpr uint32_t kTempoQ16One = 65536u;
 static constexpr uint32_t kTicksPerQuarter = 24u;   // 24 PPQN
 static constexpr uint32_t kTicksPerBar = 96u;       // 4/4
+static constexpr uint32_t kTicksPerStep = 12u;      // one eighth-note step
 static constexpr uint32_t kGlideShortTicks = 2u * kTicksPerBar;  // 192
 static constexpr uint32_t kGlideLongTicks = 4u * kTicksPerBar;   // 384
 static constexpr uint32_t kTempoMinQ16 = 40u * kTempoQ16One;
 static constexpr uint32_t kTempoMaxQ16 = 300u * kTempoQ16One;
 
-// What one tick looks like to the clock interrupt.
+// What one tick looks like to the clock interrupt. Timing only: where the
+// player sits musically is the transport's business.
 struct TickPlan {
   uint32_t period_us;       // integer microseconds until the following tick
   uint32_t tempo_q16;       // tempo this tick runs at
   uint32_t next_tempo_q16;  // tempo the following tick will run at
   uint32_t tick_index;
-  bool bar_start;
-  bool sample_swap;  // the pending sample selection takes effect on this tick
 };
 
 // Owns the master tempo: the selected sample's tempo, glides between samples
@@ -34,12 +34,20 @@ class TempoEngine {
   bool gliding() const { return glide_total_ > 0; }
   bool pendingRequest() const { return pending_request_; }
 
-  // A new sample was selected: it enters, and the glide starts, on the next
-  // bar line.
+  // A new sample was selected. The transport decides when the bar line comes;
+  // startPendingGlide() then begins the ramp.
   void requestSampleTempo(uint32_t target_q16);
+  uint32_t pendingTarget() const { return pending_target_q16_; }
+  // Begins the pending glide. Returns true when a request was waiting, so the
+  // caller knows the sample swap happens on this tick.
+  bool startPendingGlide();
+  // Same request, but taken immediately and without a ramp: used while the
+  // player is stopped.
+  bool applyPendingTempoNow();
 
-  // Absolute tempo from the knob. Taking over cancels a running glide.
+  // Absolute tempo, cancelling any glide: the tempo knob, or a jump.
   void setKnobTempo(uint32_t tempo_q16);
+  void jumpToTempo(uint32_t tempo_q16);
 
   // Plans the next tick and advances the engine. Called once per tick.
   TickPlan planNextTick();

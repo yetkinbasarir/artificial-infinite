@@ -31,16 +31,10 @@ std::vector<TickPlan> run(TempoEngine& engine, uint32_t ticks) {
   return plans;
 }
 
-// Runs until the pending sample change takes effect; the last plan is that
-// tick. Fails rather than looping forever if it never happens.
-std::vector<TickPlan> runUntilSwap(TempoEngine& engine) {
-  std::vector<TickPlan> plans;
-  for (uint32_t i = 0; i < kTicksPerBar * 2u; ++i) {
-    plans.push_back(engine.planNextTick());
-    if (plans.back().sample_swap) return plans;
-  }
-  assert(false);
-  return plans;
+// The transport decides when a bar line arrives; here we simply say so and
+// let the glide start, the way the clock does.
+void crossBarLine(TempoEngine& engine) {
+  engine.startPendingGlide();
 }
 
 void testTickPeriodCarriesTheFraction() {
@@ -98,51 +92,58 @@ void testGlideCurve() {
   assert(first_step < middle_step / 10.0);
 }
 
-void testGlideStartsOnBarLineAndLandsOnTarget() {
+void testGlideWaitsForTheBarLineAndLandsOnTarget() {
   TempoEngine engine;
   engine.reset(bpm(120.0));
-  // A few ticks into the first bar the user picks another sample.
   run(engine, 5);
   engine.requestSampleTempo(bpm(150.0));
   assert(engine.pendingRequest());
 
-  // Nothing happens until the bar line.
-  const std::vector<TickPlan> rest_of_bar = runUntilSwap(engine);
-  for (size_t i = 0; i + 1 < rest_of_bar.size(); ++i) {
-    assert(!rest_of_bar[i].sample_swap);
-    assert(rest_of_bar[i].tempo_q16 == bpm(120.0));
-  }
-  const TickPlan& swap = rest_of_bar.back();
-  assert(swap.bar_start);
-  assert(swap.sample_swap);
-  assert(swap.tick_index % kTicksPerBar == 0);
-  assert(swap.tempo_q16 == bpm(120.0));  // the glide starts at T0
+  // Until the transport reports a bar line the tempo does not move.
+  const std::vector<TickPlan> waiting = run(engine, 40);
+  for (const TickPlan& plan : waiting) assert(plan.tempo_q16 == bpm(120.0));
+  assert(!engine.gliding());
+
+  crossBarLine(engine);
+  assert(!engine.pendingRequest());
   assert(engine.gliding());
+  assert(run(engine, 1).back().tempo_q16 == bpm(120.0));  // starts at T0
 
   // The glide lands exactly on the target at tick N.
   const uint32_t n = TempoEngine::glideTicksFor(bpm(120.0), bpm(150.0));
   const std::vector<TickPlan> glide = run(engine, n);
   assert(glide.back().tempo_q16 == bpm(150.0));
   assert(!engine.gliding());
-  // And stays there.
   assert(run(engine, 10).back().tempo_q16 == bpm(150.0));
+}
+
+void testStoppedPlayerTakesTheTempoWithoutGliding() {
+  TempoEngine engine;
+  engine.reset(bpm(120.0));
+  engine.requestSampleTempo(bpm(170.0));
+  assert(engine.applyPendingTempoNow());
+  assert(!engine.gliding());
+  assert(engine.tempo() == bpm(170.0));
+  assert(!engine.applyPendingTempoNow());
 }
 
 void testGlideDuringGlideRestartsFromCurrentTempo() {
   TempoEngine engine;
   engine.reset(bpm(100.0));
   engine.requestSampleTempo(bpm(150.0));
-  runUntilSwap(engine);  // reaches the bar line, glide starts
+  crossBarLine(engine);
   run(engine, kTicksPerBar / 2u);
   const uint32_t mid_tempo = engine.tempo();
   assert(mid_tempo > bpm(100.0) && mid_tempo < bpm(150.0));
 
   engine.requestSampleTempo(bpm(90.0));
   // The new glide begins on the next bar line, from wherever the tempo is now.
-  const std::vector<TickPlan> to_bar = runUntilSwap(engine);
-  const uint32_t start = to_bar.back().tempo_q16;
+  run(engine, 10);
+  crossBarLine(engine);
+  const uint32_t start = engine.tempo();
   const uint32_t n = TempoEngine::glideTicksFor(start, bpm(90.0));
-  const std::vector<TickPlan> glide = run(engine, n);
+  // Tick 0 of the glide sits at the starting tempo, tick N lands on target.
+  const std::vector<TickPlan> glide = run(engine, n + 1u);
   assert(glide.back().tempo_q16 == bpm(90.0));
 }
 
@@ -150,13 +151,10 @@ void testNoGlideWhenTempoMatches() {
   TempoEngine engine;
   engine.reset(bpm(128.0));
   engine.requestSampleTempo(bpm(128.0));
+  // The sample still changes on the bar line, but the tempo does not move.
+  assert(engine.startPendingGlide());
   const std::vector<TickPlan> plans = run(engine, kTicksPerBar + 10u);
-  bool swapped = false;
-  for (const TickPlan& plan : plans) {
-    if (plan.sample_swap) swapped = true;
-    assert(plan.tempo_q16 == bpm(128.0));
-  }
-  assert(swapped);  // the sample still changes on the bar line
+  for (const TickPlan& plan : plans) assert(plan.tempo_q16 == bpm(128.0));
   assert(!engine.gliding());
 }
 
@@ -164,7 +162,7 @@ void testKnobTakesOverAndCancelsGlide() {
   TempoEngine engine;
   engine.reset(bpm(120.0));
   engine.requestSampleTempo(bpm(170.0));
-  runUntilSwap(engine);
+  crossBarLine(engine);
   run(engine, 40);
   assert(engine.gliding());
 
@@ -188,6 +186,7 @@ void testNextTempoMatchesTheFollowingTick() {
   TempoEngine engine;
   engine.reset(bpm(100.0));
   engine.requestSampleTempo(bpm(150.0));
+  crossBarLine(engine);
   const std::vector<TickPlan> plans = run(engine, kTicksPerBar * 4u);
   for (size_t i = 0; i + 1 < plans.size(); ++i) {
     assert(plans[i].next_tempo_q16 == plans[i + 1].tempo_q16);
@@ -200,7 +199,8 @@ int main() {
   testTickPeriodCarriesTheFraction();
   testGlideLengthSelection();
   testGlideCurve();
-  testGlideStartsOnBarLineAndLandsOnTarget();
+  testGlideWaitsForTheBarLineAndLandsOnTarget();
+  testStoppedPlayerTakesTheTempoWithoutGliding();
   testGlideDuringGlideRestartsFromCurrentTempo();
   testNoGlideWhenTempoMatches();
   testKnobTakesOverAndCancelsGlide();

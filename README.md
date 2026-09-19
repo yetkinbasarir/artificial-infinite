@@ -30,14 +30,53 @@ The web loader and the published UF2 use the master build.
 
 ### Master (default)
 
-- The clock starts at boot and never stops; playback runs continuously.
+- The clock starts at boot and never stops, and **MIDI clock is the only thing
+  the port ever sends**: no start, continue or stop messages.
 - 24 PPQN, 4/4, so a bar is 96 ticks. One beat is an eighth note.
+- The board wakes up **stopped and silent**, on the sample in slot 1 whatever
+  was saved last, at that sample's tempo.
+- **Start/stop: the button on GPIO 21** (pull-up, falling edge, 30 ms
+  debounce). Starting plays from the first step on the next tick and clears
+  the macro counters and the nudge; stopping fades the output out over 5 ms.
+  The clock and its MIDI keep running either way.
 - The tempo comes from the selected sample's BPM. Selecting another sample
-  glides to its tempo (see below).
-- Tempo can be taken over by the tempo knob (selector 7, knob B): absolute
+  glides to its tempo while playing, and simply takes it while stopped.
+- Tempo can be taken over by the tempo knob (selector 1, knob B): absolute
   40–300 BPM. The knob does nothing until its position matches the running
   tempo, so a sample change never snaps the tempo to wherever the pot sits.
   Catching the tempo during a glide cancels that glide.
+
+#### Macro (selector 7)
+
+One knob of intensity (knob A) and one of mode (knob B) drive every variation
+the board makes on its own. The first 3 % of the intensity knob is off. Both
+knobs pick up rather than jump, and the macro keeps its setting when the
+selector moves away. A new mode waits for the next bar line; while the mode
+knob moves, the LED of the mode number lights for a second.
+
+The pattern is redrawn at the start of each variation period from a generator
+seeded by the period counter and the mode, so a period always sounds the same
+and the next one does not. Periods are 8, 4, 2 or 1 bars, or 2 beats or
+1 beat; more intensity means a shorter period.
+
+| Mode | What it does | Period |
+| ---- | ------------ | ------ |
+| 1 Thin | Gates shorten from 100 % to 25 % over the first half of the knob; past 0.3 the bar loses steps, spread evenly, never below two | 8 → 2 bars |
+| 2 Shuffle | Up to three quarters of the steps jump to another slice of the same sample; nothing is dropped | 4 bars → 1 beat |
+| 3 Roll | Retrigger rolls at the end of bars: every fourth bar, half a beat, sixteenths at the bottom of the knob; every bar, two beats, thirty-seconds at the top | 4 → 1 bar |
+| 4 Reverse | Up to 60 % of the steps play backwards; past half the knob some of them jump as well | 2 bars → 1 beat |
+| 5 Abstract | One chain: gates and thinning, then jumps, then a few shortest-gate rolls | 8 bars → 1 beat |
+
+#### Nudge (selector 1 buttons)
+
+On selector 1 the eight buttons do not fire slices: they shift the player
+against the clock, in ticks. Buttons 1–4 are +1, +6, +12 and +24; buttons 5–8
+are −24, −12, −6 and −1. A forward nudge plays the skipped ticks at once and
+triggers only the last step boundary it crosses; a backward nudge swallows the
+ticks to come. Buttons 1 and 8 repeat after 400 ms every 150 ms, the others
+step once per press. Buttons 4 and 5 together return to zero. The offset is
+limited to ±96 ticks and survives a change of selector. Tick generation and
+the MIDI clock never move: only the player does.
 - **No setting is written to flash while the board plays**, because a flash
   write stops both cores and would break the clock. Settings changed with the
   knobs live until power-off; the web loader writes the stored copy.
@@ -65,8 +104,8 @@ starts on the same tick:
 
 31 250 baud 8N1 on **GPIO 22**, driven by PIO (the hardware UART TX pins are
 taken by the LEDs and the knobs) at 12 mA. Only MIDI clock leaves the port:
-one `0xFA` right before the first `0xF8`, then one `0xF8` per tick. Nothing
-else is sent, and a byte is never allowed to delay a tick.
+one `0xF8` per tick, from boot onwards, without interruption. No transport
+message is ever sent, and a byte is never allowed to delay a tick.
 
 TRS Type A wiring:
 
@@ -107,22 +146,25 @@ web loader (default 24, which matches the 1010music Blackbox analog clock
 output). MIDI clock in is not supported.
 
 GPIO 23 is driven permanently high (SMPS PWM mode) in both builds, so the
-WS2812 output is disabled. There is no trigger output.
+WS2812 output is disabled. There is no trigger output. GPIO 21 is the
+start/stop button on the master build (a button to ground; the internal
+pull-up does the rest) and the reset input on the follower build.
 
 ## Controls
 
 The first knob picks a selector position; knob A and knob B then do what the
-row says.
+row says. On the master build the buttons nudge instead of firing slices while
+selector 1 is chosen.
 
 | Selector | Knob A                          | Knob B                      |
 | -------- | ------------------------------- | --------------------------- |
-| 1        | Sample select                   | Break amount (probabilities)|
+| 1        | Sample select                   | **Tempo** (master) / Break amount (follower) |
 | 2        | **DJ filter**: low-pass / bypass / high-pass | Timestretch    |
 | 3        | Noise gate threshold            | Gate probability            |
 | 4        | Jump probability                | Retrigger probability       |
 | 5        | Tunnel probability              | Reverse probability         |
 | 6        | Sequencer record                | Sequencer play              |
-| 7        | Save settings (follower only)   | **Tempo** (master) / Load settings (follower) |
+| 7        | **Macro intensity** (master) / Save (follower) | **Macro mode** (master) / Load (follower) |
 | 8        | **Volume**                      | — (free)                    |
 
 **DJ filter (selector 2, knob A).** One pot sweeps a 4th-order Linkwitz-Riley

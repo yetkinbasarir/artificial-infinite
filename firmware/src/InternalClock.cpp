@@ -2,12 +2,15 @@
 
 #if PIKO_CLOCK_INTERNAL
 
+#include "MacroEngine.h"
 #include "SpscQueue.h"
 #include "TempoEngine.h"
+#include "Transport.h"
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/pio.h"
+#include "hardware/sync.h"
 #include "hardware/timer.h"
 #include "pico/stdlib.h"
 #include "uart_tx.pio.h"
@@ -15,8 +18,7 @@
 namespace {
 
 constexpr uint8_t kMidiClock = 0xf8;
-constexpr uint8_t kMidiStart = 0xfa;
-// One tick is planned ahead; a deeper queue would only delay a sample change.
+// One tick is planned ahead; a deeper queue would only delay a bar decision.
 constexpr uint32_t kPlanQueueSize = 4;
 
 PIO midi_pio = pio0;
@@ -25,10 +27,20 @@ uint midi_sm = 0;
 piko::TempoEngine tempo_engine;  // main loop only
 SpscQueue<piko::TickPlan, kPlanQueueSize> plan_queue;
 
+// Touched by the tick interrupt and read by the main loop and the audio path.
+piko::Transport transport;
+piko::MacroEngine macro;
+
 int alarm_num = -1;
 volatile bool clock_running = false;
-volatile bool started_transport = false;
 volatile bool sample_swap_pending = false;
+volatile bool step_pending = false;
+volatile bool restart_pending = false;
+volatile bool stop_pending = false;
+volatile bool bar_pending_glide = false;
+volatile bool macro_prepare_pending = false;
+volatile uint32_t macro_next_period = 0;
+volatile uint32_t macro_step_index = 0;
 
 // Published by the tick interrupt for audio-rate interpolation.
 volatile uint32_t tick_start_us = 0;
@@ -61,11 +73,7 @@ void __not_in_flash_func(clock_alarm_handler)(uint alarm) {
   (void)alarm;
   const uint32_t now_us = time_us_32();
 
-  // MIDI start goes out immediately before the first clock byte.
-  if (!started_transport) {
-    started_transport = true;
-    midi_send(kMidiStart);
-  }
+  // Clock out first: the player's state never delays a tick.
   midi_send(kMidiClock);
 
   piko::TickPlan plan{};
@@ -75,12 +83,31 @@ void __not_in_flash_func(clock_alarm_handler)(uint alarm) {
     last_period_us = period_us;
     tick_tempo_q16 = plan.tempo_q16;
     tick_next_tempo_q16 = plan.next_tempo_q16;
-    if (plan.sample_swap) sample_swap_pending = true;
   }
   tick_start_us = now_us;
   tick_period_us = period_us;
 
+  // Feed the shared clock path so the diagnostics keep measuring the tempo.
   piko_internal_clock_on_tick(now_us);
+
+  const piko::TransportTick tick = transport.advanceRawTick();
+  if (tick.playing) {
+    if (tick.period) {
+      // The pattern for this period was drawn in advance.
+      macro.takePrepared(tick.period_index);
+      macro_next_period = tick.period_index + 1u;
+      macro_prepare_pending = true;
+      transport.setPeriodTicks(macro.periodTicks());
+    }
+    if (tick.bar) {
+      macro.applyPendingMode();
+      bar_pending_glide = true;
+    }
+    if (tick.step) {
+      macro_step_index = tick.step_index;
+      step_pending = true;
+    }
+  }
 
   next_target_us += period_us;
   if (hardware_alarm_set_target(alarm_num,
@@ -89,6 +116,24 @@ void __not_in_flash_func(clock_alarm_handler)(uint alarm) {
     // the current time rather than firing a burst of catch-up ticks.
     next_target_us = time_us_64() + period_us;
     hardware_alarm_set_target(alarm_num, from_us_since_boot(next_target_us));
+  }
+}
+
+void __not_in_flash_func(transport_button_irq)(uint gpio, uint32_t events) {
+  if (gpio != PIKO_TRANSPORT_PIN || (events & GPIO_IRQ_EDGE_FALL) == 0) return;
+  static uint32_t last_press_us = 0;
+  static bool have_press = false;
+  const uint32_t now_us = time_us_32();
+  if (have_press && now_us - last_press_us < PIKO_TRANSPORT_DEBOUNCE_US) return;
+  last_press_us = now_us;
+  have_press = true;
+
+  if (transport.playing()) {
+    transport.requestStop();
+    stop_pending = true;
+  } else {
+    transport.requestStart();
+    restart_pending = true;
   }
 }
 
@@ -116,12 +161,27 @@ void midi_uart_init() {
   pio_sm_set_enabled(midi_pio, midi_sm, true);
 }
 
+void transport_button_init() {
+  gpio_init(PIKO_TRANSPORT_PIN);
+  gpio_set_dir(PIKO_TRANSPORT_PIN, GPIO_IN);
+  gpio_pull_up(PIKO_TRANSPORT_PIN);
+  gpio_set_irq_enabled_with_callback(PIKO_TRANSPORT_PIN, GPIO_IRQ_EDGE_FALL,
+                                     true, transport_button_irq);
+  irq_set_priority(IO_IRQ_BANK0, 0x40);
+  irq_set_enabled(IO_IRQ_BANK0, true);
+}
+
 }  // namespace
 
 void piko_internal_clock_init(uint32_t tempo_x100) {
   midi_uart_init();
+  transport_button_init();
 
   tempo_engine.reset(tempoQ16FromX100(tempo_x100));
+  transport.reset();
+  macro.reset();
+  transport.setPeriodTicks(macro.periodTicks());
+
   plan_queue.clear();
   const piko::TickPlan first = tempo_engine.planNextTick();
   last_period_us = first.period_us;
@@ -140,8 +200,18 @@ void piko_internal_clock_init(uint32_t tempo_x100) {
 
 void piko_internal_clock_service() {
   if (!clock_running) return;
-  // Keep exactly one tick ready. Planning further ahead would make a sample
-  // change wait past the bar line it belongs to.
+
+  if (bar_pending_glide) {
+    bar_pending_glide = false;
+    // The bar line has passed: start the glide and let the sample change.
+    if (tempo_engine.startPendingGlide()) sample_swap_pending = true;
+  }
+  if (macro_prepare_pending) {
+    macro_prepare_pending = false;
+    macro.prepareNextPeriod(macro_next_period);
+  }
+  // Keep exactly one tick ready. Planning further ahead would make a bar
+  // decision wait past the line it belongs to.
   if (plan_queue.empty()) {
     plan_queue.push(tempo_engine.planNextTick());
   }
@@ -149,6 +219,10 @@ void piko_internal_clock_service() {
 
 void piko_internal_clock_request_sample_tempo(uint32_t tempo_x100) {
   tempo_engine.requestSampleTempo(tempoQ16FromX100(tempo_x100));
+  if (!transport.playing()) {
+    // Nothing is playing, so there is no bar to wait for and nothing to glide.
+    if (tempo_engine.applyPendingTempoNow()) sample_swap_pending = true;
+  }
 }
 
 void piko_internal_clock_set_knob_tempo(uint32_t tempo_x100) {
@@ -159,6 +233,56 @@ bool piko_internal_clock_consume_sample_swap() {
   if (!sample_swap_pending) return false;
   sample_swap_pending = false;
   return true;
+}
+
+bool piko_internal_clock_consume_step() {
+  if (!step_pending) return false;
+  step_pending = false;
+  return true;
+}
+
+bool piko_internal_clock_consume_restart() {
+  if (!restart_pending) return false;
+  restart_pending = false;
+  return true;
+}
+
+bool piko_internal_clock_consume_stop() {
+  if (!stop_pending) return false;
+  stop_pending = false;
+  return true;
+}
+
+bool piko_internal_clock_playing() { return transport.playing(); }
+
+uint32_t piko_internal_clock_step_index() { return macro_step_index; }
+
+int32_t piko_internal_clock_nudge_offset() { return transport.nudgeOffset(); }
+
+void piko_internal_clock_nudge(int32_t ticks) {
+  const uint32_t interrupts = save_and_disable_interrupts();
+  transport.nudge(ticks);
+  restore_interrupts(interrupts);
+}
+
+void piko_internal_clock_clear_nudge() {
+  const uint32_t interrupts = save_and_disable_interrupts();
+  transport.clearNudge();
+  restore_interrupts(interrupts);
+}
+
+void piko_internal_clock_set_macro_intensity(uint16_t intensity) {
+  macro.setIntensity(intensity);
+}
+
+void piko_internal_clock_set_macro_mode(uint8_t mode) { macro.setMode(mode); }
+
+uint8_t piko_internal_clock_macro_mode() { return macro.mode(); }
+
+uint8_t piko_internal_clock_macro_pending_mode() { return macro.pendingMode(); }
+
+piko::MacroStep piko_internal_clock_macro_step() {
+  return macro.step(macro_step_index);
 }
 
 uint32_t piko_internal_clock_tempo_x100() {

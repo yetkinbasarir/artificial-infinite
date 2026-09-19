@@ -18,6 +18,14 @@ add_executable(tempo_engine_test
 target_include_directories(tempo_engine_test PRIVATE ../src)
 target_compile_options(tempo_engine_test PRIVATE -Wall -Wextra -Werror)
 
+add_executable(transport_macro_test
+  transport_macro_test.cpp
+  ../src/Transport.cpp
+  ../src/MacroEngine.cpp
+)
+target_include_directories(transport_macro_test PRIVATE ../src)
+target_compile_options(transport_macro_test PRIVATE -Wall -Wextra -Werror)
+
 add_executable(dsp_test
   dsp_test.cpp
 )
@@ -28,3 +36,4 @@ enable_testing()
 add_test(NAME clock_sync_test COMMAND clock_sync_test)
 add_test(NAME dsp_test COMMAND dsp_test)
 add_test(NAME tempo_engine_test COMMAND tempo_engine_test)
+add_test(NAME transport_macro_test COMMAND transport_macro_test)

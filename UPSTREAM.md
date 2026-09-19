@@ -178,6 +178,15 @@ external flag.
 - Web loader: BPM is read from the file name or estimated from the length
   (4/8/16/32 beats, 80–180 BPM), shown per row as an editable field, and a
   bank with a missing BPM cannot be uploaded.
+- Master build additions: `src/Transport.{h,cpp}` keeps the player's musical
+  position (clock ticks plus a nudge offset of at most ±96 ticks) and its
+  start/stop state, while `src/MacroEngine.{h,cpp}` draws a variation pattern
+  per period from a seeded generator (five modes, one intensity knob). The
+  tempo knob moved to selector 1 / knob B, selector 7 became macro intensity
+  and mode, and on selector 1 the buttons nudge instead of firing slices. The
+  board boots stopped and silent on slot 1, GPIO 21 is a start/stop button on
+  that build, stopping fades out over 5 ms, and no MIDI transport message is
+  sent at all — the port carries `0xF8` and nothing else.
 - Loader tempo analysis: `web/src/bpm.ts` analyses a dropped batch together
   (spectral flux onset envelope over a hand-written radix-2 FFT, autocorrelation
   with a log-normal tempo prior, octave settled by length matches within the

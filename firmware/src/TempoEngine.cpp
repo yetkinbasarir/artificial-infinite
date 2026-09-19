@@ -63,11 +63,36 @@ void TempoEngine::requestSampleTempo(uint32_t target_q16) {
   pending_target_q16_ = clampTempo(target_q16);
 }
 
-void TempoEngine::setKnobTempo(uint32_t tempo_q16) {
-  // The knob wins: a glide in flight is abandoned where it stands.
+void TempoEngine::jumpToTempo(uint32_t tempo_q16) {
+  // A glide in flight is abandoned where it stands.
   glide_total_ = 0;
   glide_step_ = 0;
   tempo_q16_ = clampTempo(tempo_q16);
+}
+
+void TempoEngine::setKnobTempo(uint32_t tempo_q16) { jumpToTempo(tempo_q16); }
+
+bool TempoEngine::startPendingGlide() {
+  if (!pending_request_) return false;
+  pending_request_ = false;
+  if (pending_target_q16_ == tempo_q16_) {
+    // Same tempo as the sample already playing: nothing to glide.
+    glide_total_ = 0;
+    glide_step_ = 0;
+    return true;
+  }
+  glide_from_q16_ = tempo_q16_;
+  glide_to_q16_ = pending_target_q16_;
+  glide_total_ = glideTicksFor(glide_from_q16_, glide_to_q16_);
+  glide_step_ = 0;
+  return true;
+}
+
+bool TempoEngine::applyPendingTempoNow() {
+  if (!pending_request_) return false;
+  pending_request_ = false;
+  jumpToTempo(pending_target_q16_);
+  return true;
 }
 
 uint32_t TempoEngine::tempoForTick(uint32_t glide_step) const {
@@ -82,31 +107,12 @@ TickPlan TempoEngine::planNextTick() {
     ++tick_index_;
   }
 
-  const bool bar_start = (tick_index_ % kTicksPerBar) == 0;
-  bool sample_swap = false;
-  if (bar_start && pending_request_) {
-    sample_swap = true;
-    pending_request_ = false;
-    if (pending_target_q16_ == tempo_q16_) {
-      // Same tempo as the sample already playing: nothing to glide.
-      glide_total_ = 0;
-      glide_step_ = 0;
-    } else {
-      glide_from_q16_ = tempo_q16_;
-      glide_to_q16_ = pending_target_q16_;
-      glide_total_ = glideTicksFor(glide_from_q16_, glide_to_q16_);
-      glide_step_ = 0;
-    }
-  }
-
   if (glide_total_ > 0) {
     tempo_q16_ = tempoForTick(glide_step_);
   }
 
   TickPlan plan{};
   plan.tick_index = tick_index_;
-  plan.bar_start = bar_start;
-  plan.sample_swap = sample_swap;
   plan.tempo_q16 = tempo_q16_;
 
   // The tempo the following tick will use, so audio can interpolate towards it.
