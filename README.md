@@ -143,10 +143,31 @@ pot, unity at the top. There is no distortion stage.
 ## Sample BPM
 
 Every sample needs a BPM, because the master build takes its tempo from it.
-The loader reads it from the file name (`120bpm`, `bpm120`, `128 BPM`,
-`87.5bpm`, case-insensitive) and otherwise estimates it by dividing the length
-into 4, 8, 16 and 32 beats and taking the first tempo between 80 and 180 BPM.
-If neither works the BPM field is left empty and the bank cannot be uploaded
+The loader works it out for a whole batch of dropped files at once:
+
+1. A BPM in the file name (`120bpm`, `bpm120`, `128 BPM`, `87.5bpm`,
+   case-insensitive) is taken as given.
+2. Otherwise the length is divided into 4, 8, 16 and 32 beats for candidate
+   tempos, and a spectral flux onset envelope plus its autocorrelation gives an
+   approximate tempo. The candidate closest to it wins, counting half and
+   double as equally close.
+3. When a candidate and its double are equally plausible, the octave is settled
+   from the batch: a sample whose length matches (or halves, or doubles) one
+   that names its BPM plays at that BPM (1 % tolerance). Failing that, the
+   candidate with 2.5–3.5 onsets per beat, and failing that the one inside
+   80–180 BPM.
+
+Each row shows where its BPM came from. Rows settled by length, by onset
+density, or with a tempo more than 4 % away from the estimate are marked: play
+them against the click to check. The preview button plays the loop with a
+click at its BPM, and the click can be switched off.
+
+Samples are placed in slots slowest first by centi-BPM, ties by name; editing a
+BPM and leaving the field re-sorts them. **Download named copies** hands back
+the files you added as a zip with `_119.23bpm` appended to each name (files
+that already state their BPM are left alone).
+
+If no BPM can be found the field is left empty and the bank cannot be uploaded
 until it is filled in; every row's BPM is editable to two decimals.
 
 Bank format v3 stores `source_bpm` as centi-BPM in the same 16-bit field

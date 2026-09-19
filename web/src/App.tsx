@@ -18,7 +18,9 @@ import { driver, type Driver } from 'driver.js';
 import 'driver.js/dist/driver.css';
 import { Estimation } from 'arrival-time';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { decodeAndEncodeFile, makePreviewBuffer } from './audio';
+import { decodeAndEncodeFile, inferBpmFromName, makePreviewBuffer, pcmToMono } from './audio';
+import { analyzeSampleBpm, bpmSourceLabel } from './bpm';
+import { buildZip, namedCopyFilename } from './zip';
 import {
   BANK_MAX_SAMPLES,
   BANK_SAMPLE_RATE,
@@ -84,6 +86,7 @@ export function App() {
   const [playheadFrame, setPlayheadFrame] = useState(0);
   const [debugLog, setDebugLog] = useState<string[]>([]);
   const [debugOpen, setDebugOpen] = useState(false);
+  const [clickEnabled, setClickEnabled] = useState(true);
   const [clockDiagnostics, setClockDiagnostics] = useState<ClockDiagnostics | null>(null);
   const [theme] = useState<Theme>(() => loadTheme());
   const debugOpenRef = useRef(false);
@@ -504,7 +507,36 @@ export function App() {
         setStatus({ text: `Processing ${file.name}`, kind: 'idle' });
         next.push(await decodeAndEncodeFile(file));
       }
-      setSamples((current) => [...current, ...next].slice(0, BANK_MAX_SAMPLES));
+
+      // One analysis over the whole batch: samples that name their BPM settle
+      // the octave for the ones that do not.
+      setStatus({ text: 'Analysing tempo', kind: 'idle' });
+      const references = samples
+        .filter((sample) => sample.bpmSource === 'name' && sample.bpm > 0)
+        .map((sample) => ({
+          name: sample.name,
+          seconds: sample.pcm.length / BANK_SAMPLE_RATE,
+          bpm: sample.bpm,
+        }));
+      const analyses = analyzeSampleBpm(
+        next.map((sample, index) => ({
+          id: sample.id,
+          name: filesToProcess[index].name,
+          mono: pcmToMono(sample.pcm),
+          sampleRate: BANK_SAMPLE_RATE,
+        })),
+        references,
+      );
+      for (const analysis of analyses) {
+        const sample = next.find((item) => item.id === analysis.id);
+        if (!sample || !(analysis.bpm > 0)) continue;
+        sample.bpm = Math.round(analysis.bpm * 100) / 100;
+        sample.beats = analysis.beats;
+        sample.bpmSource = analysis.source;
+        sample.bpmFlagged = analysis.flagged;
+      }
+
+      setSamples((current) => sortSamplesForSlots([...current, ...next].slice(0, BANK_MAX_SAMPLES)));
       setBankDirty(true);
       setStatus({
         text:
@@ -692,11 +724,44 @@ export function App() {
     source.connect(context.destination);
     const startedAt = context.currentTime;
     source.start();
+    if (clickEnabled && sample.bpm > 0) scheduleClick(context, startedAt, sample.bpm);
     source.onended = () => {
       if (audioRef.current?.source === source) setPlayingId(null);
     };
     audioRef.current = { context, source, startedAt, frameCount: pcm.length };
     setPlayingId(sample.id);
+  }
+
+  // Slots run slow to fast by centi-BPM, then by name.
+  function reorderSamples() {
+    setSamples((current) => sortSamplesForSlots(current));
+  }
+
+  async function downloadNamedCopies() {
+    const withFiles = samples.filter((sample) => sample.file != null);
+    if (withFiles.length === 0) {
+      setStatus({ text: 'No original files to export in this session', kind: 'warn' });
+      return;
+    }
+    try {
+      await beginBusyOperation();
+      setStatus({ text: 'Building zip', kind: 'idle' });
+      const entries = [];
+      for (const sample of withFiles) {
+        const file = sample.file as File;
+        const data = new Uint8Array(await file.arrayBuffer());
+        entries.push({
+          name: namedCopyFilename(file.name, sample.bpm, inferBpmFromName(file.name) != null),
+          data,
+        });
+      }
+      saveBlob(new Blob([buildZip(entries)], { type: 'application/zip' }), 'samples-with-bpm.zip');
+      setStatus({ text: `Downloaded ${entries.length} named copies`, kind: 'good' });
+    } catch (error) {
+      setStatus({ text: errorMessage(error), kind: 'bad' });
+    } finally {
+      endBusyOperation();
+    }
   }
 
   function startTour() {
@@ -902,6 +967,25 @@ export function App() {
           </button>
         </div>
         <div className="toolbar-subrow">
+          <div className="sample-tools">
+            <label title="Play a click at each sample's BPM while previewing">
+              <input
+                type="checkbox"
+                checked={clickEnabled}
+                onChange={(event) => setClickEnabled(event.currentTarget.checked)}
+              />
+              Click on preview
+            </label>
+            <button
+              type="button"
+              className="text-button"
+              onClick={() => void downloadNamedCopies()}
+              disabled={busy || samples.every((sample) => sample.file == null)}
+              title="Download the added files with their BPM in the name, as a zip"
+            >
+              Download named copies
+            </button>
+          </div>
           <div className="clock-mode">
             {hasExternalClockSettings(device) ? (
               <>
@@ -1062,6 +1146,7 @@ export function App() {
               playheadFrame={playingId === sample.id ? playheadFrame : null}
               theme={theme}
               onUpdate={(patch) => updateSample(sample.id, patch)}
+              onCommitBpm={reorderSamples}
               onRemove={() => removeSample(sample.id)}
               onMove={(direction) => moveSample(index, direction)}
               onPreview={() => void togglePreview(sample)}
@@ -1091,6 +1176,7 @@ function SampleRow({
   playheadFrame,
   theme,
   onUpdate,
+  onCommitBpm,
   onRemove,
   onMove,
   onPreview,
@@ -1101,6 +1187,7 @@ function SampleRow({
   playheadFrame: number | null;
   theme: Theme;
   onUpdate: (patch: Partial<BankSample>) => void;
+  onCommitBpm: () => void;
   onRemove: () => void;
   onMove: (direction: -1 | 1) => void;
   onPreview: () => void;
@@ -1125,7 +1212,16 @@ function SampleRow({
           onChange={(event) => onUpdate({ name: event.target.value })}
         />
         <div className="sample-stats">
-          <label title={sample.bpm > 0 ? 'Sample tempo' : 'No BPM found: enter one before uploading'}>
+          <label
+            className={sample.bpmFlagged ? 'bpm-field flagged' : 'bpm-field'}
+            title={
+              sample.bpm > 0
+                ? `Sample tempo${sample.bpmSource ? ` (${bpmSourceLabel(sample.bpmSource)})` : ''}${
+                    sample.bpmFlagged ? ' — worth checking against the click' : ''
+                  }`
+                : 'No BPM found: enter one before uploading'
+            }
+          >
             BPM
             <input
               className={sample.bpm > 0 ? 'bpm' : 'bpm missing'}
@@ -1143,6 +1239,7 @@ function SampleRow({
               onBlur={() => {
                 setBpmEditing(false);
                 setBpmText(formatBpm(sample.bpm));
+                onCommitBpm();
               }}
             />
           </label>
@@ -1157,6 +1254,12 @@ function SampleRow({
               onChange={(event) => onUpdate({ beats: Number(event.target.value) || 1 })}
             />
           </label>
+          {sample.bpmSource ? (
+            <span className={sample.bpmFlagged ? 'bpm-source flagged' : 'bpm-source'}>
+              {bpmSourceLabel(sample.bpmSource)}
+              {sample.bpmFlagged ? ' ⚠' : ''}
+            </span>
+          ) : null}
           <span>{formatDuration(length)}</span>
           <span>{formatBytes(length)}</span>
         </div>
@@ -1293,6 +1396,43 @@ function formatBytes(bytes: number): string {
 
 function formatDuration(frames: number): string {
   return `${(frames / BANK_SAMPLE_RATE).toFixed(2)} s`;
+}
+
+// Slots run slow to fast; centi-BPM is what the bank stores, so ties there are
+// real ties and fall back to the name.
+function sortSamplesForSlots(samples: BankSample[]): BankSample[] {
+  return [...samples].sort((a, b) => {
+    const centiA = Math.round(a.bpm * 100);
+    const centiB = Math.round(b.bpm * 100);
+    if (centiA !== centiB) return centiA - centiB;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+// A short click on every beat of the loop, scheduled a few seconds ahead and
+// topped up while the preview runs.
+function scheduleClick(context: AudioContext, startedAt: number, bpm: number): number {
+  const beatSeconds = 60 / bpm;
+  const horizon = 30;
+  const gain = context.createGain();
+  gain.gain.value = 0.35;
+  gain.connect(context.destination);
+  const clickFrames = Math.round(context.sampleRate * 0.02);
+  const buffer = context.createBuffer(1, clickFrames, context.sampleRate);
+  const channel = buffer.getChannelData(0);
+  for (let i = 0; i < clickFrames; i++) {
+    const decay = Math.exp(-i / (context.sampleRate * 0.004));
+    channel[i] = Math.sin((2 * Math.PI * 1500 * i) / context.sampleRate) * decay;
+  }
+  let beats = 0;
+  for (let time = startedAt; time < startedAt + horizon; time += beatSeconds) {
+    const click = context.createBufferSource();
+    click.buffer = buffer;
+    click.connect(gain);
+    click.start(time);
+    beats++;
+  }
+  return beats;
 }
 
 // Two decimals, because the bank stores centi-BPM.

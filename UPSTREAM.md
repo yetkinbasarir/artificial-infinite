@@ -178,6 +178,14 @@ external flag.
 - Web loader: BPM is read from the file name or estimated from the length
   (4/8/16/32 beats, 80–180 BPM), shown per row as an editable field, and a
   bank with a missing BPM cannot be uploaded.
+- Loader tempo analysis: `web/src/bpm.ts` analyses a dropped batch together
+  (spectral flux onset envelope over a hand-written radix-2 FFT, autocorrelation
+  with a log-normal tempo prior, octave settled by length matches within the
+  batch, then onset density, then the 80–180 range) and records where each BPM
+  came from, flagging the ones worth a listen. Rows preview with a click at
+  their own BPM, slots are ordered by centi-BPM then name, and
+  `web/src/zip.ts` is a store-only ZIP writer for the named-copies download.
+  No new dependencies.
 - **Bank format v3**: `source_bpm` is centi-BPM in the same 16-bit field, so
   fractional sample tempos reach the tempo engine intact. The loader writes v3
   and still reads v2 (scaling whole BPM up); firmware rejects a v2 bank found

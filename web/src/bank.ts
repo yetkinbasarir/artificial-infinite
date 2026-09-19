@@ -16,6 +16,11 @@ export interface BankSample {
   name: string;
   // BPM as shown to the user; stored in the bank as centi-BPM.
   bpm: number;
+  // Where the BPM came from, and whether that choice wants a listen.
+  bpmSource?: 'name' | 'analysis' | 'length' | 'onsets';
+  bpmFlagged?: boolean;
+  // The file this sample was decoded from, kept for the named-copies zip.
+  file?: File;
   beats: number;
   peak: number;
   pcm: Uint8Array;

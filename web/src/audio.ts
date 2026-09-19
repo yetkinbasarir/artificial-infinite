@@ -91,6 +91,7 @@ export async function decodeAndEncodeFile(file: File): Promise<BankSample> {
 
   const estimated = estimateLoopFromFrames(pcm.length);
   // 0 means "no BPM": the row shows it as missing and upload stays blocked.
+  // The batch analysis in bpm.ts refines both of these right after decoding.
   const bpm = inferBpmFromName(file.name) ?? estimated?.bpm ?? 0;
   const beats = inferBeatsFromName(file.name) ?? estimated?.beats ?? 8;
   return {
@@ -102,7 +103,15 @@ export async function decodeAndEncodeFile(file: File): Promise<BankSample> {
     pcm,
     cropStart: 0,
     cropEnd: pcm.length,
+    file,
   };
+}
+
+// The decoded, downsampled mono audio the bank stores, as floats for analysis.
+export function pcmToMono(pcm: Uint8Array): Float32Array {
+  const mono = new Float32Array(pcm.length);
+  for (let i = 0; i < pcm.length; i++) mono[i] = signedByteToFloat(pcm[i]) / 128;
+  return mono;
 }
 
 export function makePreviewBuffer(context: AudioContext, pcm: Uint8Array): AudioBuffer {
