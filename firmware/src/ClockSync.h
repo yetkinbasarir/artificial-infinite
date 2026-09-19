@@ -67,9 +67,10 @@ class ClockSync {
   ClockDiagnostics diagnostics() const;
 
   static bool validPulsePpqn(uint8_t ppqn);
+  // Both tempos are centi-BPM (x100), so the ratio is taken directly.
   static uint64_t playbackIncrementQ32(uint32_t carrier_hz,
                                        uint32_t target_bpm_x100,
-                                       uint32_t source_bpm);
+                                       uint32_t source_bpm_x100);
 
  private:
   static constexpr uint8_t kEdgeHistory = 25u;  // 48 PPQN needs 24 intervals

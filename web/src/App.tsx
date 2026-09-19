@@ -1106,6 +1106,14 @@ function SampleRow({
   onPreview: () => void;
 }) {
   const length = croppedPcm(sample).length;
+  // The field is edited as text so typing "87.5" is not reformatted mid-word;
+  // it settles to two decimals on blur.
+  const [bpmText, setBpmText] = useState(formatBpm(sample.bpm));
+  const [bpmEditing, setBpmEditing] = useState(false);
+  useEffect(() => {
+    if (!bpmEditing) setBpmText(formatBpm(sample.bpm));
+  }, [sample.bpm, bpmEditing]);
+
   return (
     <article className="sample-row">
       <div className="sample-meta">
@@ -1122,11 +1130,20 @@ function SampleRow({
             <input
               className={sample.bpm > 0 ? 'bpm' : 'bpm missing'}
               type="number"
-              min={1}
-              max={65535}
+              min={0.01}
+              max={655.35}
+              step={0.01}
               placeholder="?"
-              value={sample.bpm > 0 ? sample.bpm : ''}
-              onChange={(event) => onUpdate({ bpm: Number(event.target.value) || 0 })}
+              value={bpmText}
+              onFocus={() => setBpmEditing(true)}
+              onChange={(event) => {
+                setBpmText(event.target.value);
+                onUpdate({ bpm: parseBpm(event.target.value) });
+              }}
+              onBlur={() => {
+                setBpmEditing(false);
+                setBpmText(formatBpm(sample.bpm));
+              }}
             />
           </label>
           <label>
@@ -1276,6 +1293,18 @@ function formatBytes(bytes: number): string {
 
 function formatDuration(frames: number): string {
   return `${(frames / BANK_SAMPLE_RATE).toFixed(2)} s`;
+}
+
+// Two decimals, because the bank stores centi-BPM.
+function formatBpm(bpm: number): string {
+  return bpm > 0 ? bpm.toFixed(2) : '';
+}
+
+function parseBpm(text: string): number {
+  const value = Number(text);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  // The field holds centi-BPM in the bank, so keep two decimals.
+  return Math.round(value * 100) / 100;
 }
 
 function pulseDivisionLabel(ppqn: PulsePpqn): string {

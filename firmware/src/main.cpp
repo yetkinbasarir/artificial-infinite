@@ -37,7 +37,7 @@
 // constants
 #define CLOCK_RATE 248000
 #define SAMPLE_RATE 24000
-#define BPM_SAMPLED 165
+#define BPM_SAMPLED 16500  // centi-BPM: 165.00
 #define SAMPLES_PER_BEAT 4364
 #define NUM_RETRIGS 19
 #define raw_val piko_raw_val
@@ -121,7 +121,7 @@ uint8_t do_mute_debounce = 0;
 // sample tracking
 uint16_t sample = 0;
 uint16_t sample_beats = 8;
-uint16_t sample_source_bpm = BPM_SAMPLED;
+uint16_t sample_source_bpm = BPM_SAMPLED;  // centi-BPM
 uint32_t sample_frames_per_slice = SAMPLES_PER_BEAT;
 uint16_t sample_change = 0;
 uint16_t sample_add = 0;
@@ -282,7 +282,7 @@ void update_playback_rate() {
   uint32_t bpm_x100 = clock_sync.targetBpmX100();
 #endif
   if (bpm_x100 == 0) {
-    bpm_x100 = static_cast<uint32_t>(sample_source_bpm) * 100u;
+    bpm_x100 = sample_source_bpm;
   }
   playback_target_bpm_x100 = bpm_x100;
   playback_increment_q32 = piko::ClockSync::playbackIncrementQ32(
@@ -1467,7 +1467,7 @@ int main(void) {
 #if PIKO_CLOCK_INTERNAL
   // Master clock: start on the selected sample's tempo and keep running.
   configure_clock_capture();
-  piko_internal_clock_init(static_cast<uint32_t>(sample_source_bpm) * 100u);
+  piko_internal_clock_init(sample_source_bpm);
 #else
   // initialize clock and reset capture
   gpio_set_irq_enabled_with_callback(CLOCK_PIN, GPIO_IRQ_EDGE_FALL, true,
@@ -1775,9 +1775,7 @@ int main(void) {
 #if PIKO_CLOCK_INTERNAL
                     // The new sample sets the tempo from the next bar line.
                     piko_internal_clock_request_sample_tempo(
-                        static_cast<uint32_t>(
-                            piko_audio_sample(sample_change).source_bpm) *
-                        100u);
+                        piko_audio_sample(sample_change).source_bpm);
                     tempo_knob_captured = false;
                     tempo_knob_smoothed_x100 = 0;
 #endif

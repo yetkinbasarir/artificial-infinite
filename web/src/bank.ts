@@ -1,5 +1,9 @@
 export const BANK_MAGIC = 0x4f4b4950;
-export const BANK_VERSION = 2;
+export const BANK_VERSION = 3;
+// Version 3 stores source_bpm as centi-BPM; version 2 stored whole BPM.
+export const BANK_VERSION_WHOLE_BPM = 2;
+export const BPM_SCALE = 100;
+export const BPM_MAX_CENTI = 65535;
 export const BANK_HEADER_SIZE = 12288;
 export const BANK_SAMPLE_RATE = 24000;
 export const BANK_MAX_SAMPLES = 128;
@@ -10,6 +14,7 @@ export const BANK_SAMPLE_NAME_BYTES = 48;
 export interface BankSample {
   id: string;
   name: string;
+  // BPM as shown to the user; stored in the bank as centi-BPM.
   bpm: number;
   beats: number;
   peak: number;
@@ -78,7 +83,12 @@ export function buildBankBlob(samples: BankSample[], capacityBytes: number): Uin
     const recordOffset = 32 + index * BANK_SAMPLE_RECORD_SIZE;
     view.setUint32(recordOffset, audioOffset, true);
     view.setUint32(recordOffset + 4, pcm.length, true);
-    view.setUint16(recordOffset + 8, Math.max(1, Math.min(65535, Math.round(sample.bpm))), true);
+    // Fractional tempos are kept: 87.5 BPM is written as 8750.
+    view.setUint16(
+      recordOffset + 8,
+      Math.max(1, Math.min(BPM_MAX_CENTI, Math.round(sample.bpm * BPM_SCALE))),
+      true,
+    );
     view.setUint16(recordOffset + 10, Math.max(1, Math.min(65535, Math.round(sample.beats))), true);
     view.setUint8(recordOffset + 12, sample.peak);
     view.setUint8(recordOffset + 13, 0);
@@ -100,7 +110,11 @@ export function parseBankBlob(blob: Uint8Array): ParsedBank {
   const sampleCount = view.getUint32(16, true);
   const audioBytes = view.getUint32(20, true);
 
-  if (magic !== BANK_MAGIC || version !== BANK_VERSION || headerSize !== BANK_HEADER_SIZE) {
+  if (
+    magic !== BANK_MAGIC ||
+    (version !== BANK_VERSION && version !== BANK_VERSION_WHOLE_BPM) ||
+    headerSize !== BANK_HEADER_SIZE
+  ) {
     throw new Error('Unsupported pikocore bank');
   }
   if (blob.length < BANK_HEADER_SIZE) throw new Error('Bank blob is too small');
@@ -113,7 +127,10 @@ export function parseBankBlob(blob: Uint8Array): ParsedBank {
     const recordOffset = 32 + index * BANK_SAMPLE_RECORD_SIZE;
     const offset = view.getUint32(recordOffset, true);
     const frameCount = view.getUint32(recordOffset + 4, true);
-    const bpm = view.getUint16(recordOffset + 8, true);
+    // A version 2 bank holds whole BPM; scale it up to centi-BPM.
+    const storedBpm = view.getUint16(recordOffset + 8, true);
+    const bpmCenti = version === BANK_VERSION_WHOLE_BPM ? storedBpm * BPM_SCALE : storedBpm;
+    const bpm = bpmCenti / BPM_SCALE;
     const beats = view.getUint16(recordOffset + 10, true);
     const peak = view.getUint8(recordOffset + 12);
     const name = readName(blob, recordOffset + 14) || `Sample ${index + 1}`;

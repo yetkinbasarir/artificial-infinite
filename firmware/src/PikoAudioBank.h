@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 static constexpr uint32_t PIKO_BANK_MAGIC = 0x4f4b4950u;  // "PIKO"
-static constexpr uint32_t PIKO_BANK_VERSION = 2u;
+static constexpr uint32_t PIKO_BANK_VERSION = 3u;
 static constexpr uint32_t PIKO_BANK_HEADER_SIZE = 12288u;
 static constexpr uint32_t PIKO_BANK_SAMPLE_RATE = 24000u;
 static constexpr uint32_t PIKO_BANK_MAX_SAMPLES = 128u;
@@ -27,7 +27,7 @@ static constexpr uint32_t PIKO_AUDIO_FLASH_OFFSET = PIKO_FIRMWARE_RESERVE;
 struct PikoAudioSample {
   uint32_t offset;
   uint32_t frame_count;
-  uint16_t source_bpm;
+  uint16_t source_bpm;  // centi-BPM: 12000 = 120.00 BPM
   uint16_t beat_count;
   uint8_t peak;
   uint8_t flags;
@@ -37,7 +37,7 @@ struct PikoAudioSample {
 struct PikoBankSampleRecord {
   uint32_t offset;
   uint32_t frame_count;
-  uint16_t source_bpm;
+  uint16_t source_bpm;  // centi-BPM: 12000 = 120.00 BPM
   uint16_t beat_count;
   uint8_t peak;
   uint8_t flags;

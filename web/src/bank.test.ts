@@ -4,6 +4,8 @@ import {
   BANK_MAGIC,
   BANK_MAX_SAMPLES,
   BANK_SAMPLE_RECORD_SIZE,
+  BANK_VERSION,
+  BANK_VERSION_WHOLE_BPM,
   buildBankBlob,
   parseBankBlob,
   type BankSample,
@@ -83,6 +85,45 @@ describe('pikocore bank format', () => {
 
   it('keeps all sample records inside the v2 header', () => {
     expect(32 + BANK_MAX_SAMPLES * BANK_SAMPLE_RECORD_SIZE).toBeLessThanOrEqual(BANK_HEADER_SIZE);
+  });
+});
+
+describe('centi-BPM storage', () => {
+  it('writes version 3 and keeps two decimals', () => {
+    const pcm = new Uint8Array([1, 2, 3, 4]);
+    const blob = buildBankBlob(
+      [{ id: 'a', name: 'Half time', bpm: 87.5, beats: 8, peak: 100, pcm, cropStart: 0, cropEnd: pcm.length }],
+      1000,
+    );
+    const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+    expect(view.getUint32(4, true)).toBe(BANK_VERSION);
+    expect(view.getUint16(32 + 8, true)).toBe(8750);
+    expect(parseBankBlob(blob).samples[0].bpm).toBeCloseTo(87.5, 5);
+  });
+
+  it('reads a version 2 bank by scaling whole BPM up', () => {
+    const pcm = new Uint8Array([1, 2, 3, 4]);
+    const blob = buildBankBlob(
+      [{ id: 'a', name: 'Old', bpm: 170, beats: 8, peak: 100, pcm, cropStart: 0, cropEnd: pcm.length }],
+      1000,
+    );
+    const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+    // Rewrite it the way firmware before this change stored it.
+    view.setUint32(4, BANK_VERSION_WHOLE_BPM, true);
+    view.setUint16(32 + 8, 170, true);
+
+    const parsed = parseBankBlob(blob);
+    expect(parsed.samples[0].bpm).toBe(170);
+  });
+
+  it('rejects a bank version it does not know', () => {
+    const pcm = new Uint8Array([1]);
+    const blob = buildBankBlob(
+      [{ id: 'a', name: 'Future', bpm: 120, beats: 8, peak: 10, pcm, cropStart: 0, cropEnd: pcm.length }],
+      1000,
+    );
+    new DataView(blob.buffer, blob.byteOffset, blob.byteLength).setUint32(4, 99, true);
+    expect(() => parseBankBlob(blob)).toThrow('Unsupported pikocore bank');
   });
 });
 

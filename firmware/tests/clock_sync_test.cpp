@@ -332,12 +332,13 @@ void testTempoClamping() {
 }
 
 void testPlaybackRatios() {
+  // Both tempos are centi-BPM: 12000 is 120.00 BPM.
   constexpr uint32_t carrier = 1000000u;
-  const uint64_t unity = ClockSync::playbackIncrementQ32(carrier, 12000, 120);
+  const uint64_t unity = ClockSync::playbackIncrementQ32(carrier, 12000, 12000);
   const uint64_t double_speed =
-      ClockSync::playbackIncrementQ32(carrier, 24000, 120);
+      ClockSync::playbackIncrementQ32(carrier, 24000, 12000);
   const uint64_t half_speed =
-      ClockSync::playbackIncrementQ32(carrier, 6000, 120);
+      ClockSync::playbackIncrementQ32(carrier, 6000, 12000);
   assert(double_speed == unity * 2u || double_speed == unity * 2u - 1u ||
          double_speed == unity * 2u + 1u);
   assert(half_speed == unity / 2u || half_speed == unity / 2u + 1u);
@@ -345,12 +346,13 @@ void testPlaybackRatios() {
   // Exercise loader BPM/beat-count combinations. Beat count changes slicing
   // only, while source BPM determines the fractional playback rate.
   for (const uint32_t target_bpm_x100 : {3000u, 12000u, 24000u, 30000u}) {
-    for (const uint32_t source_bpm : {90u, 120u, 165u, 200u}) {
+    // Fractional source tempos survive: 8750 is 87.50 BPM.
+    for (const uint32_t source_bpm_x100 : {9000u, 12000u, 16500u, 8750u}) {
       uint64_t rate_for_first_beat_count = 0;
       for (const uint32_t beat_count : {1u, 8u, 16u, 128u}) {
         (void)beat_count;
         const uint64_t rate = ClockSync::playbackIncrementQ32(
-            carrier, target_bpm_x100, source_bpm);
+            carrier, target_bpm_x100, source_bpm_x100);
         if (rate_for_first_beat_count == 0) {
           rate_for_first_beat_count = rate;
         } else {
@@ -359,7 +361,7 @@ void testPlaybackRatios() {
         const long double actual_hz =
             static_cast<long double>(rate) * carrier / (1ull << 32u);
         const long double expected_hz =
-            24000.0L * target_bpm_x100 / (100.0L * source_bpm);
+            24000.0L * target_bpm_x100 / source_bpm_x100;
         assert(std::abs(actual_hz - expected_hz) < 0.001L);
       }
     }

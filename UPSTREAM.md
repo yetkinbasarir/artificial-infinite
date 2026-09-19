@@ -178,6 +178,10 @@ external flag.
 - Web loader: BPM is read from the file name or estimated from the length
   (4/8/16/32 beats, 80–180 BPM), shown per row as an editable field, and a
   bank with a missing BPM cannot be uploaded.
+- **Bank format v3**: `source_bpm` is centi-BPM in the same 16-bit field, so
+  fractional sample tempos reach the tempo engine intact. The loader writes v3
+  and still reads v2 (scaling whole BPM up); firmware rejects a v2 bank found
+  in flash, so banks written before this change must be uploaded again.
 
 ## Pulling changes from upstream
 

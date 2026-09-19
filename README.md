@@ -14,7 +14,7 @@ rebuilt external clock system; see [UPSTREAM.md](UPSTREAM.md) for details.
 | ----------- | --------- | --------------------------------------------------------------- |
 | `0x000000`  | 512 KB    | Firmware reserve (`PIKO_FIRMWARE_RESERVE`)                      |
 | `0x07F000`  | 4 KB      | Settings (last sector of the firmware reserve)                  |
-| `0x080000`  | 12 KB     | Sample bank header (v2, up to 128 samples)                      |
+| `0x080000`  | 12 KB     | Sample bank header (v3, up to 128 samples)                      |
 | `0x083000`  | ~1.56 MB  | Audio: 1,560,576 bytes ≈ 65 s of 8-bit audio at 24 kHz          |
 
 ## Clock
@@ -147,7 +147,14 @@ The loader reads it from the file name (`120bpm`, `bpm120`, `128 BPM`,
 `87.5bpm`, case-insensitive) and otherwise estimates it by dividing the length
 into 4, 8, 16 and 32 beats and taking the first tempo between 80 and 180 BPM.
 If neither works the BPM field is left empty and the bank cannot be uploaded
-until it is filled in; every row's BPM is editable.
+until it is filled in; every row's BPM is editable to two decimals.
+
+Bank format v3 stores `source_bpm` as centi-BPM in the same 16-bit field
+(12000 = 120.00 BPM, up to 655.35), so fractional tempos survive the trip to
+the board. The loader still reads v2 banks, where that field held whole BPM.
+A v3 bank is rejected by firmware older than this change, and firmware from
+this change on reports its sample count as 0 for a v2 bank already in flash:
+re-upload the bank after updating.
 
 ## Build the firmware
 

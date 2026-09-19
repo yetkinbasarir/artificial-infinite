@@ -285,11 +285,11 @@ ClockDiagnostics ClockSync::diagnostics() const {
 
 uint64_t ClockSync::playbackIncrementQ32(uint32_t carrier_hz,
                                          uint32_t target_bpm_x100,
-                                         uint32_t source_bpm) {
-  if (carrier_hz == 0 || source_bpm == 0) return 0;
+                                         uint32_t source_bpm_x100) {
+  if (carrier_hz == 0 || source_bpm_x100 == 0) return 0;
   const uint64_t numerator = 24000ull * target_bpm_x100 * kPhaseOne;
   const uint64_t denominator =
-      static_cast<uint64_t>(source_bpm) * 100u * carrier_hz;
+      static_cast<uint64_t>(source_bpm_x100) * carrier_hz;
   return (numerator + denominator / 2u) / denominator;
 }
 
