@@ -208,6 +208,12 @@ external flag.
   per pass while its knob is off. It replaces the sequencer there, which is
   compiled out. Freeze on selector 8 / knob A holds the playing slice and
   retriggers it every step while everything else keeps counting underneath.
+- The master build drops the granular timestretch altogether (engine, state,
+  the selector 2 / knob B control and the stretch scaling of the slice
+  window), so that knob is free there and the follower keeps it. Selector 6
+  belongs to the looper on that build: no retriggering at all, and the closing
+  gesture records nothing — neither the presses in the scan that closes the
+  loop nor a button still held at that moment.
 - Loader tempo analysis: `web/src/bpm.ts` analyses a dropped batch together
   (spectral flux onset envelope over a hand-written radix-2 FFT, autocorrelation
   with a log-normal tempo prior, octave settled by length matches within the

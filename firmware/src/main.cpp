@@ -87,6 +87,7 @@
 #define RESTART_ON_START_DISABLED 2
 #define MIDI_NOTES_AVAILABLE_TOTAL 28
 static constexpr uint32_t kKnobMax = 4095u;
+#if !PIKO_CLOCK_INTERNAL
 static constexpr uint32_t kStretchQ8One = 256u;
 static constexpr uint32_t kStretchQ8Bypass =
     (11u * kStretchQ8One + 5u) / 10u;
@@ -94,6 +95,7 @@ static constexpr uint32_t kStretchQ8Max = 10u * kStretchQ8One;
 static constexpr uint32_t kGrainLengthSamples = 2048u;
 static constexpr uint32_t kGrainHopSamples = 1024u;
 static constexpr uint32_t kGrainHopShift = 10u;
+#endif
 static constexpr uint64_t kTimestretchPhaseIncQ32 = 1ull << 32u;
 static constexpr uint16_t kPwmWrap = 2047u;
 static constexpr uint16_t kPwmLevelScale = (kPwmWrap + 1u) / 256u;
@@ -141,18 +143,19 @@ uint16_t select_beat_freeze = 0;
 bool direction[] = {1, 1};  // 0 = reverse, 1 = forward
 bool base_direction = 1;    // 0 = reverse, 1 == forward
 
+// filter/bitcrush
+DjFilter dj_filter;
+uint8_t bitcrush = 0;
+
+#if !PIKO_CLOCK_INTERNAL
+uint16_t volume_gain = VOLUME_GAIN_UNITY;  // 0 = silent, 256 = unity
+
 struct TimestretchGrain {
   uint64_t start_phase_q32;
   uint64_t phase_inc_q32;
   uint16_t age;
 };
 
-// filter/bitcrush/stretch
-#if !PIKO_CLOCK_INTERNAL
-uint16_t volume_gain = VOLUME_GAIN_UNITY;  // 0 = silent, 256 = unity
-#endif
-DjFilter dj_filter;
-uint8_t bitcrush = 0;
 uint32_t stretch_q8 = kStretchQ8One;
 uint32_t timestretch_applied_q8 = kStretchQ8One;
 uint64_t timestretch_phase_q32 = 0;
@@ -163,6 +166,7 @@ TimestretchGrain timestretch_grains[2] = {
 uint8_t timestretch_audio_now = 128;
 bool timestretch_active = false;
 bool timestretch_grains_initialized = false;
+#endif
 
 // beat tracking (beat = eighth-note)
 uint32_t beat_num_total = 0;
@@ -280,6 +284,8 @@ static constexpr uint16_t kNudgeRepeatDelay = 100u;   // 400 ms at 250 Hz
 static constexpr uint16_t kNudgeRepeatPeriod = 37u;   // 150 ms at 250 Hz
 uint16_t nudge_hold[NUM_BUTTONS] = {0, 0, 0, 0, 0, 0, 0, 0};
 bool nudge_mode = false;
+// Selector 6 belongs to the looper: its buttons never start a retrigger.
+bool looper_mode = false;
 #endif
 
 piko::ClockSync clock_sync;
@@ -488,14 +494,17 @@ void refresh_sample_timing(uint16_t sample_index) {
 void restart_slice_window() {
   uint64_t frames = static_cast<uint64_t>(sample_frames_per_slice)
                     << flag_half_time;
+#if !PIKO_CLOCK_INTERNAL
   if (timestretch_active && timestretch_applied_q8 > kStretchQ8One) {
     frames = (frames * timestretch_applied_q8) >> 8u;
   }
+#endif
   if (frames == 0) frames = 1;
   if (frames > 0xfffffffful) frames = 0xfffffffful;
   slice_frames_remaining = static_cast<uint32_t>(frames);
 }
 
+#if !PIKO_CLOCK_INTERNAL
 uint32_t stretch_from_knob_q8(uint16_t knob) {
   const uint64_t eased_knob = static_cast<uint64_t>(knob) * knob * knob;
   const uint64_t eased_max =
@@ -633,6 +642,7 @@ uint8_t render_stretched_sample() {
   }
   return static_cast<uint8_t>(output);
 }
+#endif  // !PIKO_CLOCK_INTERNAL
 
 void reset_retrig_fx() {
   retrig_filter = 0;
@@ -646,6 +656,7 @@ void reset_retrig_fx() {
   update_playback_rate();
 }
 
+#if !PIKO_CLOCK_INTERNAL
 void sync_phase_sample_from_timestretch() {
   const uint32_t frame_count = raw_len(sample);
   timestretch_phase_q32 = wrap_stretch_phase(timestretch_phase_q32, frame_count);
@@ -699,6 +710,7 @@ void sync_timestretch_sample_selection() {
       wrap_stretch_phase(timestretch_phase_q32, raw_len(sample));
   invalidate_timestretch_grains();
 }
+#endif  // !PIKO_CLOCK_INTERNAL
 
 void do_stop_everything();
 void do_start_everything();
@@ -714,9 +726,11 @@ void restart_loop_from_beginning() {
   phase_xfade = 0;
   phase_retrig = 0;
   playback_phase_q32 = 0;
+#if !PIKO_CLOCK_INTERNAL
   timestretch_phase_q32 = 0;
   timestretch_audio_now = 128;
   invalidate_timestretch_grains();
+#endif
   resume_transport_phase = false;
   btn_reset = true;
 }
@@ -966,7 +980,11 @@ void pwm_interrupt_handler() {
         button_on2 = NUM_BUTTONS;
       }
     }
+#if PIKO_CLOCK_INTERNAL
+    if (!looper_mode) {
+#else
     if (!timestretch_active) {
+#endif
       if (!btn_retrig) {
         // check button 2
         if (button_on < NUM_BUTTONS && do_mute_debounce == 0) {
@@ -1087,8 +1105,7 @@ void pwm_interrupt_handler() {
   // stays silent while it is on.
   piko::LoopTrigger loop_hit;
   if (piko_internal_clock_consume_loop_trigger(&loop_hit) && !freeze_active &&
-      !timestretch_active && !fx_retrig && piko_audio_sample_count() > 0 &&
-      sample_beats > 0) {
+      !fx_retrig && piko_audio_sample_count() > 0 && sample_beats > 0) {
     select_beat = loop_hit.slice % sample_beats;
     phase_head = 1 - phase_head;
     phase_xfade = 1 << HEAD_SHIFT;
@@ -1106,7 +1123,11 @@ void pwm_interrupt_handler() {
 #endif
 
   // disable beat interrupts during fx
+#if PIKO_CLOCK_INTERNAL
+  if (fx_retrig) {
+#else
   if (fx_retrig && !timestretch_active) {
+#endif
     beat_onset = false;
   }
 
@@ -1129,9 +1150,12 @@ void pwm_interrupt_handler() {
     return;
   }
 
+#if !PIKO_CLOCK_INTERNAL
   update_timestretch_state();
+#endif
 
   if (audio_tick || beat_onset) {
+#if !PIKO_CLOCK_INTERNAL
     if (timestretch_active) {
       if (audio_tick) {
         sync_timestretch_sample_selection();
@@ -1150,7 +1174,9 @@ void pwm_interrupt_handler() {
         beat_onset = false;
         btn_reset = 0;
       }
-    } else {
+    } else
+#endif
+    {
       // beat onset causes next sample
       if (beat_onset && fx_retrig == false) {
         bool do_switch_heads = true;
@@ -1459,9 +1485,12 @@ void pwm_interrupt_handler() {
   }
 
   // determine sample
+#if !PIKO_CLOCK_INTERNAL
   if (timestretch_active) {
     audio_now = timestretch_audio_now;
-  } else {
+  } else
+#endif
+  {
     if (phase_xfade == 0) {
       audio_now = raw_val(sample, phase_sample[phase_head]);
     } else {
@@ -1996,6 +2025,7 @@ int main(void) {
 #if PIKO_CLOCK_INTERNAL
       // On selector 1 the buttons nudge the player instead of firing slices.
       nudge_mode = selector_knob == 0;
+      looper_mode = selector_knob == 5;
       if (nudge_mode) {
         for (uint8_t i = 0; i < NUM_BUTTONS; i++) input_button[i].Read();
         const bool clear_combo =
@@ -2090,15 +2120,21 @@ int main(void) {
         for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
           if (input_button[i].On()) held++;
         }
+        // Two buttons down together close the loop. Nothing pressed in that
+        // scan is recorded, the closing button included.
+        bool closing = false;
+        if (held > 1 && piko_internal_clock_looper_recording()) {
+          for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+            if (input_button[i].Rising()) closing = true;
+          }
+          if (closing) piko_internal_clock_looper_close(now_ms);
+        }
         for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
           if (input_button[i].Rising()) {
-            if (held > 1 && piko_internal_clock_looper_recording()) {
-              piko_internal_clock_looper_close(now_ms);
-            } else {
-              const uint8_t slice =
-                  (uint8_t)((i + select_beat_freeze) % (sample_beats > 0 ? sample_beats : 1));
-              piko_internal_clock_looper_press(i, slice, now_ms);
-            }
+            if (closing) continue;
+            const uint8_t slice =
+                (uint8_t)((i + select_beat_freeze) % (sample_beats > 0 ? sample_beats : 1));
+            piko_internal_clock_looper_press(i, slice, now_ms);
           } else if (input_button[i].Falling()) {
             piko_internal_clock_looper_release(i, now_ms);
           }
@@ -2347,9 +2383,14 @@ int main(void) {
                   break;
 #endif
                 case 1:
+#if PIKO_CLOCK_INTERNAL
+                  // free slot (was timestretch)
+                  break;
+#else
                   // stretch
                   set_timestretch_knob(input_knob[i].Value());
                   break;
+#endif
                 case 2:
                   // gate probability
                   if (input_knob[i].Value() < 200) {

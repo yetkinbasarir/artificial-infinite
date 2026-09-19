@@ -108,14 +108,16 @@ void Looper::closeLoop(uint32_t position, uint32_t now_ms) {
   if (length_ > kLoopMaxTicks) length_ = kLoopMaxTicks;
   recording_ = false;
 
-  // Close any press still down, then start the loop from its beginning.
-  for (uint8_t i = 0; i < kLoopButtons; ++i) {
-    const int16_t index = open_event_[i];
-    if (index >= 0 && static_cast<uint32_t>(index) < count_) {
-      events_[index].open = false;
-    }
-    open_event_[i] = -1;
+  // A press that was still down when the loop closed is part of the closing
+  // gesture, not of the loop: it goes, and its release changes nothing.
+  uint32_t kept = 0;
+  for (uint32_t i = 0; i < count_; ++i) {
+    if (events_[i].open) continue;
+    events_[kept++] = events_[i];
   }
+  count_ = kept;
+  for (uint8_t i = 0; i < kLoopButtons; ++i) open_event_[i] = -1;
+  last_press_event_ = -1;
   loop_start_ = position;
   last_loop_position_ = 0;
   have_last_position_ = false;

@@ -89,6 +89,25 @@ void testTwoPressesInsideFiftyMillisecondsAreOneGesture() {
   assert(looper.eventCount() == 2u);
 }
 
+// A button still down when the loop closes is part of the gesture, so its
+// press never enters the loop.
+void testHeldButtonsAtCloseAreNotRecorded() {
+  Looper looper = makeLooper();
+  looper.pressButton(0, 1, 0, 0);
+  looper.releaseButton(0, 6, 100);      // a note that stays
+  looper.pressButton(2, 2, 24, 400);    // still held when the loop closes
+  looper.closeLoop(48, 800);            // well past the 50 ms window
+
+  assert(looper.eventCount() == 1u);
+  // Its release afterwards changes nothing.
+  looper.releaseButton(2, 60, 900);
+  assert(looper.eventCount() == 1u);
+
+  const std::vector<std::pair<uint32_t, LoopTrigger>> hits =
+      run(looper, 48, 2u * kLoopBeatTicks);
+  for (const auto& hit : hits) assert(hit.second.slice == 1);
+}
+
 void testAutoClosesAtEightBars() {
   Looper looper = makeLooper();
   looper.pressButton(0, 0, 0, 0);
@@ -221,6 +240,7 @@ int main() {
   testClosingRoundsToAtLeastOneBeat();
   testGestureRightAfterTheOnlyPressLeavesNoLoop();
   testTwoPressesInsideFiftyMillisecondsAreOneGesture();
+  testHeldButtonsAtCloseAreNotRecorded();
   testAutoClosesAtEightBars();
   testOverdubAndLastPressWins();
   testEraseZoneRemovesOneButton();

@@ -93,9 +93,10 @@ reaches flash.
   player's position, up to 256 of them, so a nudge carries the loop too.
 - Pressing a second button while one is down closes the loop, rounded to the
   nearest beat and never shorter than one. The loop returns to its start and
-  plays at once. If the second press came within 50 ms of the first, that first
-  press is taken back out — the gesture is not recorded. Left open, the loop
-  closes itself at eight bars.
+  plays at once. Nothing pressed in the scan that closes the loop is recorded,
+  the closing button included, and a button still held at that moment has its
+  press taken back out too — the gesture never lands in the loop. Left open,
+  the loop closes itself at eight bars.
 - Once closed, further presses overdub. Where two events land on the same tick,
   the one pressed last is heard. Each event plays its slice for as long as the
   button was held, at the velocity it was recorded with.
@@ -104,8 +105,10 @@ reaches flash.
 - With knob A off the loop keeps playing but loses a quarter of its velocity
   every pass; events that fall below the floor go, and once none are left the
   loop is free for a new recording.
-- The loop plays on whatever the selector shows. Two buttons together only
-  close the loop on selector 6; elsewhere they still start a retrigger.
+- The loop plays on whatever the selector shows. On selector 6 the buttons
+  never start a retrigger — two together close the loop, and the retrigger
+  chance is off there as well; on every other selector retriggering is
+  unchanged.
 - Stopping the transport keeps the loop and silences it; starting plays it from
   its own beginning alongside the first step.
 
@@ -211,7 +214,7 @@ selector 1 is chosen.
 | Selector | Knob A                          | Knob B                      |
 | -------- | ------------------------------- | --------------------------- |
 | 1        | Sample select                   | **Tempo** (master) / Break amount (follower) |
-| 2        | **DJ filter**: low-pass / bypass / high-pass | Timestretch    |
+| 2        | **DJ filter**: low-pass / bypass / high-pass | — (free on master) / Timestretch (follower) |
 | 3        | Noise gate threshold            | Gate probability            |
 | 4        | Jump probability                | Retrigger probability       |
 | 5        | Tunnel probability              | Reverse probability         |
@@ -224,6 +227,9 @@ isolator. The middle of the pot (±5 %) is a hard bypass: audio passes through
 bit for bit. Turning left sweeps a low-pass from 10 kHz down to 60 Hz; turning
 right sweeps a high-pass from 30 Hz up to 6 kHz. There is no resonance, and
 the cutoff is smoothed so a fast turn does not zipper.
+
+**Timestretch (selector 2, knob B).** Follower build only: the granular
+stretch. The master build does not have it, so that knob does nothing there.
 
 **Volume (selector 8, knob A).** Follower build only: a linear gain, silent at
 the bottom of the pot and unity at the top, with no distortion stage. The
