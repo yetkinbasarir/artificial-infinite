@@ -105,10 +105,10 @@ reaches flash.
 - With knob A off the loop keeps playing but loses a quarter of its velocity
   every pass; events that fall below the floor go, and once none are left the
   loop is free for a new recording.
-- The loop plays on whatever the selector shows. On selector 6 the buttons
-  never start a retrigger — two together close the loop, and the retrigger
-  chance is off there as well; on every other selector retriggering is
-  unchanged.
+- The loop plays on whatever the selector shows. On selector 6 two buttons
+  together close the loop instead of starting a retrigger; everything else
+  about retriggering — the chance set on selector 4 and the macro's rolls —
+  works there just as it does elsewhere.
 - Stopping the transport keeps the loop and silences it; starting plays it from
   its own beginning alongside the first step.
 

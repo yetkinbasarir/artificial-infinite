@@ -981,7 +981,7 @@ void pwm_interrupt_handler() {
       }
     }
 #if PIKO_CLOCK_INTERNAL
-    if (!looper_mode) {
+    {
 #else
     if (!timestretch_active) {
 #endif
@@ -996,6 +996,12 @@ void pwm_interrupt_handler() {
             if (input_button[i].On()) {
 #ifdef DEBUG_BUTTONS
               printf("%d + %d\n", button_on, i);
+#endif
+#if PIKO_CLOCK_INTERNAL
+              // On the looper's selector two buttons close the loop instead of
+              // starting a retrigger. Everything else about retriggering, the
+              // chance from selector 4 and the macro's rolls included, stays.
+              if (looper_mode) continue;
 #endif
               btn_retrig = true;
               button_on2 = i;
@@ -1012,9 +1018,12 @@ void pwm_interrupt_handler() {
           retrig_count = retrig_max;
         }
       }
-    } else {
+    }
+#if !PIKO_CLOCK_INTERNAL
+    else {
       reset_retrig_fx();
     }
+#endif
     if (!fx_retrig) {
 #ifdef DEBUG_PWM
       printf("[%d bpm_x100 / beat_num: %d] ", playback_target_bpm_x100,

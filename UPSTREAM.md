@@ -211,8 +211,9 @@ external flag.
 - The master build drops the granular timestretch altogether (engine, state,
   the selector 2 / knob B control and the stretch scaling of the slice
   window), so that knob is free there and the follower keeps it. Selector 6
-  belongs to the looper on that build: no retriggering at all, and the closing
-  gesture records nothing — neither the presses in the scan that closes the
+  belongs to the looper on that build: two buttons together close the loop
+  rather than starting a retrigger, while the retrigger chance and the macro's
+  rolls keep working there, and the closing gesture records nothing — neither the presses in the scan that closes the
   loop nor a button still held at that moment.
 - Loader tempo analysis: `web/src/bpm.ts` analyses a dropped batch together
   (spectral flux onset envelope over a hand-written radix-2 FFT, autocorrelation
