@@ -46,7 +46,9 @@
 #define NUM_BUTTONS 8
 #define NUM_KNOBS 3
 #define NUM_LEDS 8
+#if !PIKO_CLOCK_INTERNAL
 #define VOLUME_GAIN_UNITY 256
+#endif
 #define HEAD_SHIFT 10  // crossfade time in samples (2^HEAD_SHIFT)
 #define AUDIO_PIN 20   // audio out
 #ifdef PICO_DEFAULT_LED_PIN
@@ -70,7 +72,9 @@
 // flash
 // https://github.com/raspberrypi/pico-examples/blob/master/flash/program/flash_program.c
 // https://kevinboone.me/picoflash.html
+#if !PIKO_CLOCK_INTERNAL
 #define SAVE_VOLUME 0  // needs two bytes: linear gain, 0..256
+#endif
 #define SAVE_FILTER 4  // needs one byte
 #define SAVE_SAMPLE 5  // needs one byte
 #define SAVE_GATE 6    // needs two bytes
@@ -143,8 +147,10 @@ struct TimestretchGrain {
   uint16_t age;
 };
 
-// volume/filter/bitcrush/stretch
+// filter/bitcrush/stretch
+#if !PIKO_CLOCK_INTERNAL
 uint16_t volume_gain = VOLUME_GAIN_UNITY;  // 0 = silent, 256 = unity
+#endif
 DjFilter dj_filter;
 uint8_t bitcrush = 0;
 uint32_t stretch_q8 = kStretchQ8One;
@@ -334,6 +340,7 @@ void update_playback_rate() {
   }
 }
 
+#if !PIKO_CLOCK_INTERNAL
 // Linear gain: silent at the bottom of the pot, unity at the top.
 uint16_t volume_gain_from_knob(uint16_t knobval) {
   if (knobval >= kKnobMax) return VOLUME_GAIN_UNITY;
@@ -349,6 +356,7 @@ uint8_t apply_volume_gain(uint8_t sample) {
   const int32_t centred = (int32_t)sample - 128;
   return (uint8_t)(((centred * (int32_t)volume_gain) >> 8) + 128);
 }
+#endif
 
 #if PIKO_CLOCK_INTERNAL
 // A knob only takes control once its position matches the value it would set,
@@ -1452,9 +1460,11 @@ void pwm_interrupt_handler() {
       dj_filter_process(&dj_filter, audio_now, dj_filter_effective_position());
   // </dj filter>
 
+#if !PIKO_CLOCK_INTERNAL
   // <volume> linear output gain
   audio_now = apply_volume_gain(audio_now);
   // </volume>
+#endif
 
     // <delay>
     // audio_now = delay.Update(audio_now);
@@ -1612,8 +1622,10 @@ int main(void) {
     save_data[i] = 0;
   }
   // // save defaults that aren't defaulted to 0
+#if !PIKO_CLOCK_INTERNAL
   save_data[SAVE_VOLUME] = (uint8_t)(VOLUME_GAIN_UNITY >> 8);
   save_data[SAVE_VOLUME + 1] = (uint8_t)VOLUME_GAIN_UNITY;
+#endif
   noise_gate_thresh = gate_default_thresh();
   noise_gate_thresh_use = noise_gate_thresh;
   save_data[SAVE_GATE] = (uint8_t)(noise_gate_thresh >> 8);
@@ -1830,9 +1842,11 @@ int main(void) {
           save_data[i] = flash_target_contents[i];
         }
         piko_flash_unlock();
+#if !PIKO_CLOCK_INTERNAL
         volume_gain = (uint16_t)(save_data[SAVE_VOLUME] << 8) +
                       save_data[SAVE_VOLUME + 1];
         if (volume_gain > VOLUME_GAIN_UNITY) volume_gain = VOLUME_GAIN_UNITY;
+#endif
 #if PIKO_CLOCK_INTERNAL
         // The master build always wakes up on the first slot.
         sample_change = 0;
@@ -1869,7 +1883,9 @@ int main(void) {
         configure_clock_capture();
         sequencer.Load(save_data);
 #ifdef DEBUG_SAVE
+#if !PIKO_CLOCK_INTERNAL
         printf("volume_gain: %d\n", volume_gain);
+#endif
         printf("sample_change: %d\n", sample_change);
         printf("noise_gate_thresh: %d\n", noise_gate_thresh);
         printf("probability_direction: %d\n", probability_direction);
@@ -2118,6 +2134,11 @@ int main(void) {
                   break;
 #endif
                 case 7:
+#if PIKO_CLOCK_INTERNAL
+                  // The master build has no volume control: the output runs
+                  // at full level and only the mute ramp touches it.
+                  break;
+#else
                   // volume
                   param_set_volume(input_knob[i].Value(), volume_gain);
                   save_data[SAVE_VOLUME] = (uint8_t)(volume_gain >> 8);
@@ -2126,6 +2147,7 @@ int main(void) {
                   printf("%d: %d; \n", i, input_knob[i].Value());
 #endif
                   break;
+#endif
                 default:
                   break;
               }

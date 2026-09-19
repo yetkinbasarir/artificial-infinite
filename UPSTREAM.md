@@ -197,6 +197,10 @@ external flag.
   the only runtime flash writes left are the loader's bank commands; the macro
   LED is timed from `time_us_64`; and the loader folds a BPM outside 40–300
   into range, marking the row.
+- The master build has no firmware volume control at all: selector 8 / knob A
+  does nothing there, the output gain is fixed at full level, and the volume
+  variables and the `SAVE_VOLUME` slot are compiled out. The mute ramp is
+  unaffected. The follower build keeps the linear volume knob.
 - Loader tempo analysis: `web/src/bpm.ts` analyses a dropped batch together
   (spectral flux onset envelope over a hand-written radix-2 FFT, autocorrelation
   with a log-normal tempo prior, octave settled by length matches within the

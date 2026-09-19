@@ -177,7 +177,7 @@ selector 1 is chosen.
 | 5        | Tunnel probability              | Reverse probability         |
 | 6        | Sequencer record                | Sequencer play              |
 | 7        | **Macro intensity** (master) / Save (follower) | **Macro mode** (master) / Load (follower) |
-| 8        | **Volume**                      | — (free)                    |
+| 8        | — (free on master) / **Volume** (follower) | — (free)         |
 
 **DJ filter (selector 2, knob A).** One pot sweeps a 4th-order Linkwitz-Riley
 isolator. The middle of the pot (±5 %) is a hard bypass: audio passes through
@@ -185,8 +185,10 @@ bit for bit. Turning left sweeps a low-pass from 10 kHz down to 60 Hz; turning
 right sweeps a high-pass from 30 Hz up to 6 kHz. There is no resonance, and
 the cutoff is smoothed so a fast turn does not zipper.
 
-**Volume (selector 8, knob A).** A linear gain: silent at the bottom of the
-pot, unity at the top. There is no distortion stage.
+**Volume (selector 8, knob A).** Follower build only: a linear gain, silent at
+the bottom of the pot and unity at the top, with no distortion stage. The
+master build has no volume control — the output runs at full level and only
+the 5 ms mute ramp touches it, so set the level after the board.
 
 ## Repository layout
 
