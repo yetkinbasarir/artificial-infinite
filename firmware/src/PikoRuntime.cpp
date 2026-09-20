@@ -63,6 +63,10 @@ void piko_flash_unlock() {
   mutex_exit(&flash_mutex);
 }
 
+bool piko_request_bank_changed() {
+  return submitRequest(PikoRequestType::BankChanged, 0);
+}
+
 bool piko_request_pulse_ppqn(uint8_t ppqn) {
   return submitRequest(PikoRequestType::SetPulsePpqn, ppqn);
 }

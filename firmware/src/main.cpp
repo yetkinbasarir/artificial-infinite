@@ -1623,6 +1623,36 @@ void print_buf(const uint8_t *buf, size_t len) {
 }
 
 void do_stop_everything() { do_mute = true; }
+#if PIKO_CLOCK_INTERNAL
+// The bank was rewritten or erased under us. The player starts over on the
+// first slot, stopped and silent, at that sample's own tempo. The clock keeps
+// ticking throughout, so anything downstream stays in time.
+void apply_bank_change() {
+  sample_change = 0;
+  sample_set = 0;
+  sample = 0;
+  sample_add = 0;
+  save_data[SAVE_SAMPLE] = 0;
+  debounce_sample = 0;
+  if (piko_audio_sample_count() > 0) {
+    refresh_sample_timing(0);
+  } else {
+    sample_source_bpm = BPM_SAMPLED;
+    update_playback_rate();
+  }
+  // No glide: the first slot's tempo is taken as it is, and the knob has to be
+  // moved again before it can take over.
+  piko_internal_clock_bank_reset(sample_source_bpm);
+  tempo_knob_captured = false;
+  tempo_knob_smoothed_x100 = 0;
+  // Freeze forgets its slice. With its knob still on it locks again at the
+  // first step after the next start, on whatever is playing then.
+  freeze_active = false;
+  freeze_slice = 0;
+  restart_loop_from_beginning();
+  do_mute = false;
+}
+#endif
 void do_start_everything() {
   do_mute_debounce = 8;
   button_on = NUM_BUTTONS;
@@ -1909,6 +1939,11 @@ int main(void) {
             restore_interrupts(interrupts);
             save_settings();
           }
+#endif
+          break;
+        case PikoRequestType::BankChanged:
+#if PIKO_CLOCK_INTERNAL
+          apply_bank_change();
 #endif
           break;
         case PikoRequestType::StopPlayback:

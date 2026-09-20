@@ -188,7 +188,15 @@ void handle_info() {
   char info[512];
   uint32_t used = 0;
   int n = snprintf(info + used, sizeof(info) - used,
-                   "PIKO1 FW 2.4 F %lu R %lu S %lu A %lu C %lu U %lu SR %lu N %lu PROTO 1 BANK_VERSION %lu BANK_HEADER_SIZE %lu BANK_MAX_SAMPLES %lu CLOCK_SYNC_VERSION 2 CLOCK_SOURCE %s PULSE_PPQN %u RESTART_ON_START %u\nEND\n",
+                   "PIKO1 FW 2.4 F %lu R %lu S %lu A %lu C %lu U %lu SR %lu N %lu "
+                   "PROTO 1 BANK_VERSION %lu BANK_HEADER_SIZE %lu "
+                   "BANK_MAX_SAMPLES %lu CLOCK_SYNC_VERSION 2 CLOCK_SOURCE %s"
+#if PIKO_CLOCK_INTERNAL
+                   // Neither setting exists on the master build.
+                   "\nEND\n",
+#else
+                   " PULSE_PPQN %u RESTART_ON_START %u\nEND\n",
+#endif
                    static_cast<unsigned long>(piko_flash_total_bytes()),
                    static_cast<unsigned long>(PIKO_FIRMWARE_RESERVE),
                    static_cast<unsigned long>(piko_settings_flash_offset()),
@@ -200,8 +208,12 @@ void handle_info() {
                    static_cast<unsigned long>(PIKO_BANK_VERSION),
                    static_cast<unsigned long>(PIKO_BANK_HEADER_SIZE),
                    static_cast<unsigned long>(PIKO_BANK_MAX_SAMPLES),
+#if PIKO_CLOCK_INTERNAL
+                   PIKO_CLOCK_SOURCE_NAME);
+#else
                    PIKO_CLOCK_SOURCE_NAME, piko_pulse_ppqn(),
                    piko_restart_on_start() ? 1u : 0u);
+#endif
   if (n < 0 || static_cast<uint32_t>(n) >= sizeof(info) - used) {
     return;
   }
@@ -249,6 +261,11 @@ void erase_bank_header() {
   flash_range_erase(PIKO_AUDIO_FLASH_OFFSET, PIKO_BANK_HEADER_SIZE);
   piko_flash_unlock();
   piko_audio_bank_rescan();
+#if PIKO_CLOCK_INTERNAL
+  // The player starts over before the audio path is let back in: first slot,
+  // its tempo, stopped and silent.
+  piko_request_bank_changed();
+#endif
   piko_audio_bank_set_mutating(false);
 }
 
@@ -339,6 +356,11 @@ void handle_write() {
   piko_flash_unlock();
   piko_audio_bank_rescan();
   const bool bank_ok = piko_audio_bank_valid();
+#if PIKO_CLOCK_INTERNAL
+  // The player starts over on the first slot of the bank just written, before
+  // the audio path is let back in.
+  if (bank_ok) piko_request_bank_changed();
+#endif
   piko_audio_bank_set_mutating(false);
   write_str(bank_ok ? "OK\n" : "ERR\n");
   flush_serial();

@@ -135,6 +135,33 @@ void testNudgeIsClampedAndClearable() {
   assert(transport.nudgeOffset() == 0);
 }
 
+// A bank write drops the offset instead of playing it back out.
+void testResetNudgeDropsWhatIsPending() {
+  Transport a;
+  Transport b;
+  a.reset();
+  b.reset();
+  a.requestStart();
+  b.requestStart();
+  run(a, 24);
+  run(b, 24);
+
+  a.nudge(-12);   // twelve ticks still to be swallowed
+  a.resetNudge();
+  assert(a.nudgeOffset() == 0);
+  run(a, 24);
+  run(b, 24);
+  // Nothing was swallowed and nothing is owed: the two stay together.
+  assert(a.position() == b.position());
+
+  a.nudge(12);    // twelve ticks still to be run out
+  a.resetNudge();
+  assert(a.nudgeOffset() == 0);
+  run(a, 24);
+  run(b, 24);
+  assert(a.position() == b.position());
+}
+
 void testNudgeSurvivesAndShiftsThePosition() {
   Transport a;
   Transport b;
@@ -377,6 +404,7 @@ int main() {
   testPositiveNudgeRunsExtraTicksAtOnce();
   testNegativeNudgeSwallowsTicks();
   testNudgeIsClampedAndClearable();
+  testResetNudgeDropsWhatIsPending();
   testNudgeSurvivesAndShiftsThePosition();
   testPeriodBoundaries();
   testEuclidean();

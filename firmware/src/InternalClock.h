@@ -33,6 +33,11 @@ void piko_internal_clock_request_sample_tempo(uint32_t tempo_x100);
 // Absolute tempo from the knob. Taking over cancels a glide.
 void piko_internal_clock_set_knob_tempo(uint32_t tempo_x100);
 
+// The bank was rewritten or erased: stop, take the tempo of the first slot
+// without gliding, and clear the nudge, the macro counters and the loop. The
+// clock itself keeps ticking.
+void piko_internal_clock_bank_reset(uint32_t tempo_x100);
+
 // True once, on the tick where the pending sample change takes effect.
 bool piko_internal_clock_consume_sample_swap();
 // True once per step the player should trigger.

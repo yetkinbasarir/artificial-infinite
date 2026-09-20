@@ -52,6 +52,15 @@ The web loader and the published UF2 use the master build.
   40–300 BPM. The knob does nothing until its position matches the running
   tempo, so a sample change never snaps the tempo to wherever the pot sits.
   Catching the tempo during a glide cancels that glide.
+- **Writing or erasing the bank starts the board over.** When the loader
+  finishes a bank write (or erases the bank), slot 1 is selected and the tempo
+  becomes that sample's BPM at once, without a glide; a glide in flight is
+  dropped and the tempo knob has to be moved again before it takes over. The
+  board goes stopped and silent, the nudge offset and the macro counters are
+  cleared and the macro pattern is redrawn, the loop is undefined again, and
+  freeze forgets its slice — with its knob still on it locks again at the
+  first step after the next start. The tick and its `0xF8` never pause through
+  any of this.
 
 #### Macro (selector 7)
 
@@ -198,7 +207,8 @@ reset input restarts the pattern from the first beat: within 5 ms of a clock
 pulse it belongs to that pulse and acts at once, otherwise it waits for the
 next pulse. Divisions of 1, 2, 4, 8, 12, 24 and 48 PPQN are selectable in the
 web loader (default 24, which matches the 1010music Blackbox analog clock
-output). MIDI clock in is not supported.
+output). MIDI clock in is not supported. Neither setting exists on the master
+build, which does not report them in `INFO` either.
 
 GPIO 23 is driven permanently high (SMPS PWM mode) in both builds, so the
 WS2812 output is disabled. There is no trigger output. GPIO 21 is the

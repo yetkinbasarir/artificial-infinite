@@ -5,6 +5,7 @@
 #include "ClockSync.h"
 
 enum class PikoRequestType : uint8_t {
+  BankChanged,
   SetPulsePpqn,
   SetRestartOnStart,
   StopPlayback,
@@ -33,6 +34,8 @@ void piko_flash_unlock();
 void piko_flash_lockout_victim_init();
 
 // Core 1 request API. Completion is explicitly acknowledged by core 0.
+// The sample bank was written or erased; the audio engine starts over.
+bool piko_request_bank_changed();
 bool piko_request_pulse_ppqn(uint8_t ppqn);
 bool piko_request_restart_on_start(bool enabled);
 bool piko_request_stop_playback();

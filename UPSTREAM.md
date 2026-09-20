@@ -215,6 +215,12 @@ external flag.
   rather than starting a retrigger, while the retrigger chance and the macro's
   rolls keep working there, and the closing gesture records nothing — neither the presses in the scan that closes the
   loop nor a button still held at that moment.
+- A finished bank write or an erase resets the master build: core 1 raises a
+  `BankChanged` request and core 0 selects slot 1, jumps to that sample's tempo
+  without gliding, releases the tempo knob's pickup, stops the transport,
+  clears the nudge, redraws the macro, drops the loop and forgets the frozen
+  slice. `INFO` reports neither `PULSE_PPQN` nor `RESTART_ON_START` on that
+  build, since neither setting exists there.
 - Loader tempo analysis: `web/src/bpm.ts` analyses a dropped batch together
   (spectral flux onset envelope over a hand-written radix-2 FFT, autocorrelation
   with a log-normal tempo prior, octave settled by length matches within the

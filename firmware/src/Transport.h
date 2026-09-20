@@ -41,6 +41,8 @@ class Transport {
   // negative one skips the ticks to come.
   void nudge(int32_t ticks);
   void clearNudge();
+  // Drops the offset and anything pending with it, without playing it out.
+  void resetNudge();
   int32_t nudgeOffset() const { return nudge_offset_; }
 
   // Called once per clock tick.

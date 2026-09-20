@@ -52,6 +52,12 @@ void Transport::nudge(int32_t ticks) {
 
 void Transport::clearNudge() { nudge(-nudge_offset_); }
 
+void Transport::resetNudge() {
+  nudge_offset_ = 0;
+  extra_ticks_ = 0;
+  skip_ticks_ = 0;
+}
+
 void Transport::startNow(TransportTick& tick) {
   playing_ = true;
   start_requested_ = false;

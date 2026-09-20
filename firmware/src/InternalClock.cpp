@@ -245,6 +245,23 @@ void piko_internal_clock_set_knob_tempo(uint32_t tempo_x100) {
   tempo_engine.setKnobTempo(tempoQ16FromX100(tempo_x100));
 }
 
+void piko_internal_clock_bank_reset(uint32_t tempo_x100) {
+  const uint32_t interrupts = save_and_disable_interrupts();
+  transport.requestStop();
+  transport.resetNudge();
+  // A glide in flight is abandoned and the new tempo is taken as it is.
+  tempo_engine.applyPendingTempoNow();
+  tempo_engine.jumpToTempo(tempoQ16FromX100(tempo_x100));
+  macro.beginPeriod(0);
+  macro.beginBar();
+  looper.reset();
+  sample_swap_pending = false;
+  step_pending = false;
+  loop_trigger_pending = false;
+  bar_pending_glide = false;
+  restore_interrupts(interrupts);
+}
+
 bool piko_internal_clock_consume_sample_swap() {
   if (!sample_swap_pending) return false;
   sample_swap_pending = false;
