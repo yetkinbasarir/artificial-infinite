@@ -1632,8 +1632,6 @@ void apply_bank_change() {
   sample_set = 0;
   sample = 0;
   sample_add = 0;
-  save_data[SAVE_SAMPLE] = 0;
-  debounce_sample = 0;
   if (piko_audio_sample_count() > 0) {
     refresh_sample_timing(0);
   } else {
